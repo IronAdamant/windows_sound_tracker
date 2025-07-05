@@ -178,6 +178,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Windows Core Audio APIs documentation
 - Win32 API reference
 - Community feedback and testing
+- Created with the assistance of AI (Claude) for code development and optimization
 
 ## ⚠️ Privacy Note
 
