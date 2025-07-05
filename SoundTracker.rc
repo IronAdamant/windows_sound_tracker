@@ -1,0 +1,60 @@
+#include "resource.h"
+#include <windows.h>
+
+// Export Dialog
+IDD_EXPORT_DIALOG DIALOGEX 0, 0, 350, 200
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Export Sound Logs"
+FONT 8, "Segoe UI"
+BEGIN
+    LTEXT           "Export to file:", IDC_STATIC, 10, 10, 50, 8
+    EDITTEXT        IDC_FILENAME, 10, 22, 270, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_BROWSE, 285, 21, 55, 16
+    
+    GROUPBOX        "Export Format", IDC_STATIC, 10, 45, 330, 45
+    AUTORADIOBUTTON "CSV (Comma Separated Values)", IDC_FORMAT_CSV, 20, 60, 150, 10
+    AUTORADIOBUTTON "JSON (JavaScript Object Notation)", IDC_FORMAT_JSON, 20, 72, 150, 10
+    AUTORADIOBUTTON "TXT (Plain Text)", IDC_FORMAT_TXT, 180, 60, 100, 10
+    
+    GROUPBOX        "Time Range", IDC_STATIC, 10, 95, 330, 65
+    LTEXT           "Start:", IDC_STATIC, 20, 110, 30, 8
+    CONTROL         "", IDC_START_DATE, "SysDateTimePick32", WS_TABSTOP | DTS_SHORTDATEFORMAT, 55, 108, 100, 14
+    CONTROL         "", IDC_START_TIME, "SysDateTimePick32", WS_TABSTOP | DTS_TIMEFORMAT, 160, 108, 80, 14
+    
+    LTEXT           "End:", IDC_STATIC, 20, 130, 30, 8
+    CONTROL         "", IDC_END_DATE, "SysDateTimePick32", WS_TABSTOP | DTS_SHORTDATEFORMAT, 55, 128, 100, 14
+    CONTROL         "", IDC_END_TIME, "SysDateTimePick32", WS_TABSTOP | DTS_TIMEFORMAT, 160, 128, 80, 14
+    
+    DEFPUSHBUTTON   "Export", IDOK, 185, 170, 70, 20
+    PUSHBUTTON      "Cancel", IDCANCEL, 265, 170, 70, 20
+END
+
+// Version Information
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   0x3fL
+FILEFLAGS       0x0L
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Your Company"
+            VALUE "FileDescription", "Windows Sound Tracker"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "SoundTracker"
+            VALUE "LegalCopyright", "Copyright (C) 2025"
+            VALUE "OriginalFilename", "SoundTracker.exe"
+            VALUE "ProductName", "Sound Tracker for Windows 11"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

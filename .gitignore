@@ -1,0 +1,64 @@
+# Build directories
+build/
+build_gui/
+standalone/
+out/
+x64/
+Debug/
+Release/
+.vs/
+
+# Build artifacts
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.log
+*.tlog
+*.idb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Logs
+logs/
+*.csv
+*.json
+auto_save_*.txt
+sound_log_*.txt
+sound_export*.txt
+
+# Images and screenshots
+# Ignore all images except the main UI screenshot
+images/*
+!images/windows_sound_tracker_ui.png
+
+# Documentation
+LLM_Development.md
+
+# IDE files
+.vscode/
+*.vcxproj.filters
+*.vcxproj.user
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Temporary files
+*.tmp
+*.temp
+~*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Portable builds
+SoundTracker_Portable/
+SoundTracker_Portable.zip
+*.zip
