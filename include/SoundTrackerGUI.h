@@ -56,9 +56,11 @@ private:
     std::chrono::system_clock::time_point m_lastUpdateTime;
     bool m_filterEnabled;
     std::wstring m_filterText;
+    WNDPROC m_originalStatusProc;
     
     // Window procedures
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK StatusBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam);
     
     // GUI creation
@@ -83,6 +85,7 @@ private:
     void OnClear();
     void OnFilterChanged();
     void OnListViewClick();
+    void OnStatusBarClick();
     void OnTrayIcon(LPARAM lParam);
     void ShowTrayMenu();
     void MinimizeToTray();

@@ -81,6 +81,8 @@ if(WIN32)
         advapi32
         uuid
         oleaut32
+        setupapi
+        cfgmgr32
     )
     
     # Add manifest file for admin privileges

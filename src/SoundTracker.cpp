@@ -8,6 +8,18 @@
 #include <iomanip>
 #include <memory>
 #include <algorithm>
+#include <setupapi.h>
+#include <cfgmgr32.h>
+#include <devguid.h>
+#include <initguid.h>
+
+#pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "cfgmgr32.lib")
+
+// Define USB device class GUID if not already defined
+#ifndef GUID_DEVCLASS_USB
+DEFINE_GUID(GUID_DEVCLASS_USB, 0x36fc9e60, 0xc465, 0x11cf, 0x80, 0x56, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+#endif
 
 CSoundTrackerAudioSessionEvents::CSoundTrackerAudioSessionEvents(SoundTracker* pTracker, DWORD processId) 
     : _cRef(1), _pTracker(pTracker), _processId(processId) {
@@ -401,6 +413,144 @@ std::wstring SoundTracker::GetSoundDescription(DWORD processId, const std::wstri
     return processName + L" Audio";
 }
 
+std::wstring SoundTracker::GetUSBDeviceInfo(DWORD processId, const std::wstring& processName) {
+    // Check if this might be USB-related
+    if (processId == 0 || processId == 4 || processName == L"svchost.exe" || 
+        processName == L"System" || processName.empty()) {
+        
+        // Enumerate USB devices to find recently connected ones
+        HDEVINFO hDevInfo = SetupDiGetClassDevs(&GUID_DEVCLASS_USB, NULL, NULL, DIGCF_PRESENT);
+        if (hDevInfo != INVALID_HANDLE_VALUE) {
+            SP_DEVINFO_DATA deviceData;
+            deviceData.cbSize = sizeof(SP_DEVINFO_DATA);
+            
+            for (DWORD i = 0; SetupDiEnumDeviceInfo(hDevInfo, i, &deviceData); i++) {
+                WCHAR deviceName[256] = {0};
+                WCHAR deviceDesc[256] = {0};
+                
+                // Get device description
+                if (SetupDiGetDeviceRegistryPropertyW(hDevInfo, &deviceData, 
+                    SPDRP_DEVICEDESC, NULL, (PBYTE)deviceDesc, sizeof(deviceDesc), NULL)) {
+                    
+                    // Get device friendly name
+                    SetupDiGetDeviceRegistryPropertyW(hDevInfo, &deviceData, 
+                        SPDRP_FRIENDLYNAME, NULL, (PBYTE)deviceName, sizeof(deviceName), NULL);
+                    
+                    // Get device location (port info)
+                    WCHAR locationInfo[256] = {0};
+                    if (SetupDiGetDeviceRegistryPropertyW(hDevInfo, &deviceData,
+                        SPDRP_LOCATION_INFORMATION, NULL, (PBYTE)locationInfo, sizeof(locationInfo), NULL)) {
+                        
+                        // Check if device was recently connected (simplified check)
+                        // In production, you'd check actual connection timestamps
+                        std::wstring info = L"USB: ";
+                        
+                        // Use friendly name if available, otherwise description
+                        if (deviceName[0]) {
+                            info += deviceName;
+                        } else {
+                            info += deviceDesc;
+                        }
+                        
+                        // Parse location info to make it clearer
+                        std::wstring location(locationInfo);
+                        if (location.find(L"Port_#") != std::wstring::npos) {
+                            // Extract port number
+                            size_t portPos = location.find(L"Port_#");
+                            size_t portNum = portPos + 6; // Skip "Port_#"
+                            if (portNum < location.length() && isdigit(location[portNum])) {
+                                info += L" (Port ";
+                                info += location[portNum];
+                                
+                                // Check for hub info
+                                if (location.find(L"Hub_#") != std::wstring::npos) {
+                                    size_t hubPos = location.find(L"Hub_#");
+                                    size_t hubNum = hubPos + 5;
+                                    if (hubNum < location.length() && isdigit(location[hubNum])) {
+                                        info += L", Hub ";
+                                        info += location[hubNum];
+                                    }
+                                }
+                                info += L")";
+                            }
+                        } else if (!location.empty()) {
+                            info += L" (";
+                            info += location;
+                            info += L")";
+                        }
+                        
+                        SetupDiDestroyDeviceInfoList(hDevInfo);
+                        return info;
+                    }
+                }
+            }
+            SetupDiDestroyDeviceInfoList(hDevInfo);
+        }
+    }
+    
+    return L"";
+}
+
+std::wstring SoundTracker::GetBrowserTabInfo(DWORD processId, const std::wstring& processName) {
+    // Check if this is a browser process
+    if (processName == L"chrome.exe" || processName == L"msedge.exe" || 
+        processName == L"firefox.exe" || processName == L"opera.exe" ||
+        processName == L"brave.exe" || processName == L"vivaldi.exe") {
+        
+        // Find all windows for this process
+        struct EnumData {
+            DWORD processId;
+            std::wstring title;
+        } enumData = { processId, L"" };
+        
+        EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+            EnumData* pData = reinterpret_cast<EnumData*>(lParam);
+            
+            DWORD windowProcessId;
+            GetWindowThreadProcessId(hwnd, &windowProcessId);
+            
+            if (windowProcessId == pData->processId) {
+                // Check if this is a main browser window
+                if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+                    WCHAR windowTitle[512] = {0};
+                    int length = GetWindowTextW(hwnd, windowTitle, 512);
+                    
+                    if (length > 0) {
+                        std::wstring title(windowTitle);
+                        
+                        // Skip browser UI windows
+                        if (title.find(L"DevTools") == std::wstring::npos &&
+                            title.find(L"Developer Tools") == std::wstring::npos &&
+                            title.find(L"Extensions") == std::wstring::npos) {
+                            
+                            // Extract meaningful part (remove browser name suffix)
+                            size_t dashPos = title.rfind(L" - ");
+                            if (dashPos != std::wstring::npos) {
+                                title = title.substr(0, dashPos);
+                            }
+                            
+                            // Limit length for display
+                            if (title.length() > 50) {
+                                title = title.substr(0, 47) + L"...";
+                            }
+                            
+                            pData->title = title;
+                            return FALSE; // Stop enumeration
+                        }
+                    }
+                }
+            }
+            return TRUE; // Continue enumeration
+        }, reinterpret_cast<LPARAM>(&enumData));
+        
+        if (!enumData.title.empty()) {
+            return L"Tab: \"" + enumData.title + L"\"";
+        }
+    }
+    
+    return L"";
+}
+
 void SoundTracker::AddAudioEvent(DWORD processId, float volume, float peak) {
     try {
         AudioEvent event;
@@ -410,11 +560,27 @@ void SoundTracker::AddAudioEvent(DWORD processId, float volume, float peak) {
         event.processPath = GetProcessPathFromPID(processId);
         event.soundDescription = GetSoundDescription(processId, event.processName);
         
+        // Get USB device info if applicable
+        event.usbDeviceInfo = GetUSBDeviceInfo(processId, event.processName);
+        
+        // Get browser tab info if applicable
+        event.browserTabInfo = GetBrowserTabInfo(processId, event.processName);
+        
         // Add session name to description if available
         auto sessionIt = m_sessionNames.find(processId);
         if (sessionIt != m_sessionNames.end() && !sessionIt->second.empty()) {
             event.sessionDisplayName = sessionIt->second;
             event.soundDescription += L" [" + sessionIt->second + L"]";
+        }
+        
+        // Add USB info to description if available
+        if (!event.usbDeviceInfo.empty()) {
+            event.soundDescription += L" - " + event.usbDeviceInfo;
+        }
+        
+        // Add browser tab info to description if available
+        if (!event.browserTabInfo.empty()) {
+            event.soundDescription += L" - " + event.browserTabInfo;
         }
         
         event.volumeLevel = volume;

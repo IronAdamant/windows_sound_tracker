@@ -69,6 +69,8 @@ private:
     std::wstring GetProcessNameFromPID(DWORD processId);
     std::wstring GetProcessPathFromPID(DWORD processId);
     std::wstring GetSoundDescription(DWORD processId, const std::wstring& processName);
+    std::wstring GetUSBDeviceInfo(DWORD processId, const std::wstring& processName);
+    std::wstring GetBrowserTabInfo(DWORD processId, const std::wstring& processName);
     void LogEvent(const AudioEvent& event);
     float GetPeakMeterValue(IAudioSessionControl2* pSessionControl);
 

@@ -40,7 +40,7 @@ bool Logger::Initialize() {
     m_currentLog.write(reinterpret_cast<const char*>(bom), sizeof(bom));
     
     // Write CSV header
-    std::string header = "Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,VolumeLevel,PeakLevel,IsSystemSound\n";
+    std::string header = "Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,VolumeLevel,PeakLevel,IsSystemSound,USBDevice,BrowserTab\n";
     m_currentLog << header;
     m_currentLog.flush();
     
@@ -103,7 +103,9 @@ void Logger::LogEvent(const AudioEvent& event) {
          << SanitizeForCSV(event.sessionDisplayName) << L","
          << std::fixed << std::setprecision(2) << (event.volumeLevel * 100) << L"%,"
          << std::fixed << std::setprecision(2) << (event.peakLevel * 100) << L"%,"
-         << (event.isSystemSound ? L"Yes" : L"No") << L"\n";
+         << (event.isSystemSound ? L"Yes" : L"No") << L","
+         << SanitizeForCSV(event.usbDeviceInfo) << L","
+         << SanitizeForCSV(event.browserTabInfo) << L"\n";
     
     // Convert to UTF-8 and write
     std::string utf8Line = WideToUTF8(line.str());
@@ -132,7 +134,7 @@ bool Logger::ExportEvents(const std::vector<AudioEvent>& events,
     switch (format) {
         case LogFormat::CSV: {
             // Write header
-            output << L"Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,VolumeLevel,PeakLevel,IsSystemSound,Duration(ms)\n";
+            output << L"Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,VolumeLevel,PeakLevel,IsSystemSound,USBDevice,BrowserTab,Duration(ms)\n";
             
             // Calculate durations
             for (size_t i = 0; i < events.size(); ++i) {
@@ -161,6 +163,8 @@ bool Logger::ExportEvents(const std::vector<AudioEvent>& events,
                       << std::fixed << std::setprecision(2) << (event.volumeLevel * 100) << L"%,"
                       << std::fixed << std::setprecision(2) << (event.peakLevel * 100) << L"%,"
                       << (event.isSystemSound ? L"Yes" : L"No") << L","
+                      << SanitizeForCSV(event.usbDeviceInfo) << L","
+                      << SanitizeForCSV(event.browserTabInfo) << L","
                       << duration << L"\n";
             }
             break;

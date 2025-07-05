@@ -18,4 +18,6 @@ struct AudioEvent {
     bool isSystemSound = false;                       // True if Windows system sound
     DWORD duration_ms = 0;                            // Duration in milliseconds
     DWORD eventCount = 1;                             // Number of events batched (same millisecond)
+    std::wstring usbDeviceInfo;                       // USB device information if applicable
+    std::wstring browserTabInfo;                      // Browser tab title if applicable
 };

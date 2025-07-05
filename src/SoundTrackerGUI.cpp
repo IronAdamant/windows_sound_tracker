@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <commdlg.h>
 #include <shlobj.h>
+#include <windowsx.h>
 
 SoundTrackerGUI::SoundTrackerGUI() 
     : m_hWnd(nullptr), m_hListView(nullptr), m_hButtonStartStop(nullptr),
@@ -13,7 +14,7 @@ SoundTrackerGUI::SoundTrackerGUI()
       m_hFilterCheckbox(nullptr), m_hFilterEdit(nullptr), m_hFont(nullptr),
       m_hBoldFont(nullptr), m_hIcon(nullptr), m_trayIcon({}), m_inTray(false),
       m_isTracking(false), m_updateThreadRunning(false),
-      m_lastEventCount(0), m_filterEnabled(false) {
+      m_lastEventCount(0), m_filterEnabled(false), m_originalStatusProc(nullptr) {
     m_tracker = std::make_unique<SoundTracker>();
     m_lastUpdateTime = std::chrono::system_clock::now();
 }
@@ -247,6 +248,10 @@ void SoundTrackerGUI::CreateStatusBar() {
     SendMessage(m_hStatusBar, SB_SETTEXT, 1, (LPARAM)L"Events: 0");
     SendMessage(m_hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Duration: 00:00:00");
     SendMessage(m_hStatusBar, SB_SETTEXT, 3, (LPARAM)L"Logs saved to: logs\\");
+    
+    // Subclass the status bar to handle clicks
+    SetWindowLongPtr(m_hStatusBar, GWLP_USERDATA, (LONG_PTR)this);
+    m_originalStatusProc = (WNDPROC)SetWindowLongPtr(m_hStatusBar, GWLP_WNDPROC, (LONG_PTR)StatusBarProc);
 }
 
 void SoundTrackerGUI::CreateTrayIcon() {
@@ -272,6 +277,32 @@ LRESULT CALLBACK SoundTrackerGUI::WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam
     
     if (pThis) {
         return pThis->HandleMessage(uMsg, wParam, lParam);
+    }
+    
+    return DefWindowProc(hWnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK SoundTrackerGUI::StatusBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    SoundTrackerGUI* pThis = (SoundTrackerGUI*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+    
+    if (pThis && uMsg == WM_LBUTTONUP) {
+        // Get click position
+        int xPos = GET_X_LPARAM(lParam);
+        
+        // Get status bar part boundaries
+        int parts[4];
+        SendMessage(hWnd, SB_GETPARTS, 4, (LPARAM)parts);
+        
+        // Check if clicked in the 4th part (log path section)
+        if (xPos > parts[2] && !pThis->m_isTracking) {
+            pThis->OnStatusBarClick();
+            return 0;
+        }
+    }
+    
+    // Call original procedure
+    if (pThis && pThis->m_originalStatusProc) {
+        return CallWindowProc(pThis->m_originalStatusProc, hWnd, uMsg, wParam, lParam);
     }
     
     return DefWindowProc(hWnd, uMsg, wParam, lParam);
@@ -310,6 +341,7 @@ LRESULT SoundTrackerGUI::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 }
             }
             break;
+            
             
         case WM_SIZE:
             if (wParam == SIZE_MINIMIZED) {
@@ -441,6 +473,25 @@ void SoundTrackerGUI::OnListViewClick() {
     }
 }
 
+void SoundTrackerGUI::OnStatusBarClick() {
+    // Get the current log path from the tracker
+    std::wstring logPath = m_tracker->GetCurrentLogPath();
+    
+    if (!logPath.empty()) {
+        // Get the directory path (remove filename)
+        size_t lastSlash = logPath.find_last_of(L"\\");
+        std::wstring logDir = logPath.substr(0, lastSlash);
+        
+        // Convert to absolute path if needed
+        WCHAR fullPath[MAX_PATH];
+        GetFullPathNameW(logDir.c_str(), MAX_PATH, fullPath, nullptr);
+        
+        // Open Windows Explorer with the log file selected
+        std::wstring explorerCmd = L"/select,\"" + logPath + L"\"";
+        ShellExecuteW(nullptr, L"open", L"explorer.exe", explorerCmd.c_str(), nullptr, SW_SHOW);
+    }
+}
+
 void SoundTrackerGUI::UpdateListView() {
     // Get current events
     auto now = std::chrono::system_clock::now();
@@ -568,7 +619,13 @@ void SoundTrackerGUI::UpdateStatusBar() {
     // Show current log file path
     std::wstring logPath = m_tracker->GetCurrentLogPath();
     if (!logPath.empty()) {
-        std::wstring statusText = L"Log: " + logPath;
+        std::wstring statusText;
+        if (!m_isTracking) {
+            // When stopped, show it's clickable
+            statusText = L"Log: " + logPath + L" (Click to open)";
+        } else {
+            statusText = L"Log: " + logPath;
+        }
         SendMessage(m_hStatusBar, SB_SETTEXT, 3, (LPARAM)statusText.c_str());
     }
 }

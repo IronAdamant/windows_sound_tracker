@@ -6,14 +6,24 @@ A powerful Windows application that tracks and logs ALL system sounds in real-ti
 ![Language](https://img.shields.io/badge/language-C%2B%2B-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+## 🚀 Latest Update (v1.1.0)
+
+**New Features:**
+- **USB Device Detection**: Identifies specific USB devices and ports making sounds
+- **Browser Tab Tracking**: Shows which browser tab is playing audio (privacy-respecting)
+- **Clickable Log Path**: Click the CSV path in status bar to open file location
+
 ## 🎯 Features
 
 - **Real-Time Sound Monitoring**: Tracks every sound from every application
 - **Detailed Information**: Shows process name, PID, file path, and volume levels
 - **Smart Event Batching**: Groups multiple events from the same process within the same minute
 - **System Sounds Detection**: Catches Windows notifications, USB connections, and keyboard sounds
+- **USB Device Identification**: Shows which USB device and port is making sounds
+- **Browser Tab Detection**: Displays which browser tab is playing audio (privacy-respecting)
 - **Automatic CSV Logging**: Continuously logs to CSV file in logs folder
 - **Click-to-Copy**: Click any row to copy all its data to clipboard
+- **Clickable Log Path**: Click the CSV path in status bar to open file location (when stopped)
 - **System Tray Support**: Minimize to system tray for background monitoring
 - **Filtering**: Search for sounds from specific applications
 - **Session-Based Logging**: Each tracking session creates a new timestamped CSV file
@@ -119,7 +129,8 @@ cmake --build . --config Release -- /p:RuntimeLibrary=MT
 - **Automatic Logging**: All sound events are automatically saved to CSV files
 - **Location**: Logs are stored in the `logs` folder in the same directory as the executable
 - **File Format**: `sound_log_YYYY-MM-DD_HHMMSS.csv` (one file per tracking session)
-- **Access Logs**: The status bar shows the current log file path during tracking
+- **Access Logs**: The status bar shows the current log file path
+- **Quick Access**: When tracking is stopped, click the log path in the status bar to open the file location
 
 ### Keyboard Shortcuts
 - **Double-click system tray icon**: Restore window
@@ -130,8 +141,10 @@ cmake --build . --config Release -- /p:RuntimeLibrary=MT
 All tracking sessions are automatically saved as CSV files with the following format:
 
 ```csv
-Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,VolumeLevel,PeakLevel,IsSystemSound
-2025-01-05 14:23:45.123,1,12345,Discord.exe,C:\...\Discord.exe,Discord Voice/Message,,65%,72%,No
+Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,VolumeLevel,PeakLevel,IsSystemSound,USBDevice,BrowserTab
+2025-01-05 14:23:45.123,1,12345,Discord.exe,C:\...\Discord.exe,Discord Voice/Message,,65%,72%,No,,
+2025-01-05 14:23:46.789,1,0,Unknown,,"Windows System Sound - USB: SanDisk Cruzer (Port 2)",,50%,55%,Yes,"USB: SanDisk Cruzer (Port 2)",
+2025-01-05 14:23:47.456,1,5678,chrome.exe,C:\...\chrome.exe,"Chrome Audio - Tab: ""YouTube - Best Music Mix""",,80%,85%,No,,"Tab: ""YouTube - Best Music Mix"""
 ```
 
 **Column Descriptions:**
@@ -145,6 +158,8 @@ Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,V
 - **VolumeLevel**: Current volume percentage (0-100%)
 - **PeakLevel**: Peak audio level percentage (0-100%)
 - **IsSystemSound**: Whether it's a Windows system sound
+- **USBDevice**: USB device information if the sound is from a USB device
+- **BrowserTab**: Browser tab title if the sound is from a web browser
 
 ## 🔧 Technical Details
 
