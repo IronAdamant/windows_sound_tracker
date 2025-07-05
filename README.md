@@ -34,7 +34,7 @@ The application shows a real-time list of all sounds with columns for:
 ## 🚀 Quick Start
 
 ### Download Pre-built Release
-1. Download `SoundTracker.exe` from the [Releases](https://github.com/yourusername/windows_sound_tracker/releases) page
+1. Download `SoundTracker.exe` from the [Releases](https://github.com/IronAdamant/windows_sound_tracker/releases) page
 2. Double-click to run (will request Administrator privileges)
 3. Click "Start Tracking" to begin monitoring
 
@@ -49,7 +49,7 @@ The application shows a real-time list of all sounds with columns for:
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/windows_sound_tracker.git
+   git clone https://github.com/IronAdamant/windows_sound_tracker.git
    ```
 
 2. **Open in Visual Studio:**
@@ -111,38 +111,40 @@ cmake --build . --config Release -- /p:RuntimeLibrary=MT
 2. **Begin Monitoring**: Click the "Start Tracking" button
 3. **View Events**: Watch the real-time list populate with sound events
 4. **Filter Results**: Check "Filter" and enter a process name to focus on specific apps
-5. **Export Data**: Click "Export Logs" to save data with custom time range
+5. **Stop Tracking**: Click "Stop Tracking" to end the session and save logs
 6. **Background Mode**: Minimize to system tray for unobtrusive monitoring
+
+### Log Files
+
+- **Automatic Logging**: All sound events are automatically saved to CSV files
+- **Location**: Logs are stored in the `logs` folder in the same directory as the executable
+- **File Format**: `sound_log_YYYY-MM-DD_HHMMSS.csv` (one file per tracking session)
+- **Access Logs**: The status bar shows the current log file path during tracking
 
 ### Keyboard Shortcuts
 - **Double-click system tray icon**: Restore window
 - **Right-click system tray icon**: Quick menu
 
-## 📊 Export Formats
+## 📊 CSV Log Format
 
-### CSV Format
+All tracking sessions are automatically saved as CSV files with the following format:
+
 ```csv
 Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,VolumeLevel,PeakLevel,IsSystemSound
 2025-01-05 14:23:45.123,1,12345,Discord.exe,C:\...\Discord.exe,Discord Voice/Message,,65%,72%,No
 ```
 
-### JSON Format
-```json
-{
-  "events": [
-    {
-      "timestamp": "2025-01-05 14:23:45.123",
-      "eventCount": 1,
-      "processId": 12345,
-      "processName": "Discord.exe",
-      "description": "Discord Voice/Message",
-      "volumeLevel": 65.0,
-      "peakLevel": 72.0,
-      "isSystemSound": false
-    }
-  ]
-}
-```
+**Column Descriptions:**
+- **Timestamp**: Full date and time when the sound occurred
+- **EventCount**: Number of sounds batched together (same process, same minute)
+- **ProcessID**: Windows Process ID
+- **ProcessName**: Executable name
+- **ProcessPath**: Full path to the executable
+- **Description**: Human-readable description of the sound source
+- **SessionName**: Audio session name (if available)
+- **VolumeLevel**: Current volume percentage (0-100%)
+- **PeakLevel**: Peak audio level percentage (0-100%)
+- **IsSystemSound**: Whether it's a Windows system sound
 
 ## 🔧 Technical Details
 
@@ -156,7 +158,7 @@ Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,V
 2. Monitors audio sessions via `IAudioSessionManager2`
 3. Tracks volume changes and peak levels
 4. Identifies process information for each sound
-5. Batches events occurring at the same millisecond
+5. Batches events occurring within the same minute
 
 ## 🤝 Contributing
 
@@ -186,12 +188,11 @@ This tool monitors audio metadata only (which programs are making sounds), not t
 
 ## 🐛 Known Issues
 
-- Export dialog date/time pickers use basic controls
 - Default Windows application icon (custom icon welcome via PR!)
 - Settings are not persistent between sessions
 
 ## 📞 Support
 
-- **Issues**: Please use the [GitHub Issues](https://github.com/yourusername/windows_sound_tracker/issues) page
-- **Questions**: Start a [Discussion](https://github.com/yourusername/windows_sound_tracker/discussions)
+- **Issues**: Please use the [GitHub Issues](https://github.com/IronAdamant/windows_sound_tracker/issues) page
+- **Questions**: Start a [Discussion](https://github.com/IronAdamant/windows_sound_tracker/discussions)
 - **Security**: See SECURITY.md for reporting vulnerabilities
