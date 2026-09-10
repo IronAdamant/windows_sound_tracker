@@ -28,6 +28,26 @@ CSoundTrackerAudioSessionEvents::CSoundTrackerAudioSessionEvents(SoundTracker* p
 CSoundTrackerAudioSessionEvents::~CSoundTrackerAudioSessionEvents() {
 }
 
+void CSoundTrackerAudioSessionEvents::Detach() {
+    // Wait for an in-flight callback before the tracker or logger can be destroyed.
+    std::lock_guard<std::mutex> lock(_trackerMutex);
+    _pTracker = nullptr;
+}
+
+SoundTracker::SessionRegistration::~SessionRegistration() {
+    if (events) {
+        events->Detach();
+        // Do not hold the callback mutex while calling into Core Audio.
+        if (control) {
+            control->UnregisterAudioSessionNotification(events);
+        }
+        events->Release();
+    }
+    if (control) {
+        control->Release();
+    }
+}
+
 ULONG STDMETHODCALLTYPE CSoundTrackerAudioSessionEvents::AddRef() {
     return InterlockedIncrement(&_cRef);
 }
@@ -57,14 +77,16 @@ HRESULT STDMETHODCALLTYPE CSoundTrackerAudioSessionEvents::QueryInterface(REFIID
 }
 
 HRESULT STDMETHODCALLTYPE CSoundTrackerAudioSessionEvents::OnSimpleVolumeChanged(float NewVolume, BOOL NewMute, LPCGUID EventContext) {
-    if (!NewMute && NewVolume > 0.0f) {
+    std::lock_guard<std::mutex> lock(_trackerMutex);
+    if (_pTracker && !NewMute && NewVolume > 0.0f) {
         _pTracker->AddAudioEvent(_processId, NewVolume, 0.0f);
     }
     return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CSoundTrackerAudioSessionEvents::OnStateChanged(AudioSessionState NewState) {
-    if (NewState == AudioSessionStateActive) {
+    std::lock_guard<std::mutex> lock(_trackerMutex);
+    if (_pTracker && NewState == AudioSessionStateActive) {
         _pTracker->AddAudioEvent(_processId, 0.0f, 0.0f);
     }
     return S_OK;
@@ -87,6 +109,7 @@ HRESULT STDMETHODCALLTYPE CSoundTrackerAudioSessionEvents::OnGroupingParamChange
 }
 
 HRESULT STDMETHODCALLTYPE CSoundTrackerAudioSessionEvents::OnSessionDisconnected(AudioSessionDisconnectReason DisconnectReason) {
+    _disconnected = true;
     return S_OK;
 }
 
@@ -99,24 +122,12 @@ SoundTracker::SoundTracker()
 SoundTracker::~SoundTracker() {
     Stop();
     
-    // Clean up all registered audio session events
-    {
-        std::lock_guard<std::mutex> lock(m_eventsMutex);
-        for (auto& pair : m_activeEvents) {
-            // Unregister the event notification
-            pair.first->UnregisterAudioSessionNotification(pair.second);
-            // Release the event object
-            pair.second->Release();
-            // Release the session control
-            pair.first->Release();
-        }
-        m_activeEvents.clear();
-    }
-    
     if (m_pEnumerator) {
         m_pEnumerator->Release();
     }
-    CoUninitialize();
+    if (m_comInitialized) {
+        CoUninitialize();
+    }
 }
 
 bool SoundTracker::Initialize() {
@@ -124,6 +135,7 @@ bool SoundTracker::Initialize() {
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
         return false;
     }
+    m_comInitialized = SUCCEEDED(hr);
 
     hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
                          __uuidof(IMMDeviceEnumerator), (void**)&m_pEnumerator);
@@ -135,6 +147,7 @@ bool SoundTracker::Initialize() {
 
 void SoundTracker::Start() {
     if (m_running) return;
+    if (m_monitorThread.joinable()) m_monitorThread.join();
     
     // Clear previous events for new session
     {
@@ -161,20 +174,6 @@ void SoundTracker::Stop() {
         m_monitorThread.join();
     }
     
-    // Clean up all registered audio session events when stopping
-    {
-        std::lock_guard<std::mutex> lock(m_eventsMutex);
-        for (auto& pair : m_activeEvents) {
-            // Unregister the event notification
-            pair.first->UnregisterAudioSessionNotification(pair.second);
-            // Release the event object
-            pair.second->Release();
-            // Release the session control
-            pair.first->Release();
-        }
-        m_activeEvents.clear();
-    }
-    
     // Close the logger
     if (m_logger) {
         m_logger->Close();
@@ -182,14 +181,30 @@ void SoundTracker::Stop() {
 }
 
 void SoundTracker::MonitorAudioSessions() {
+    // COM must be initialized on the thread that enumerates and owns sessions.
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+        m_running = false;
+        return;
+    }
+    IMMDeviceEnumerator* enumerator = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                               __uuidof(IMMDeviceEnumerator), (void**)&enumerator))) {
+        m_running = false;
+        CoUninitialize();
+        return;
+    }
     while (m_running) {
+        for (auto& entry : m_activeEvents) {
+            entry.second->seen = false;
+        }
+        bool enumerationComplete = true;
         // Get ALL audio endpoints, not just the default
         IMMDeviceCollection* pCollection = nullptr;
-        HRESULT hr = m_pEnumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pCollection);
+        HRESULT hr = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pCollection);
         
         if (SUCCEEDED(hr)) {
             UINT deviceCount = 0;
-            pCollection->GetCount(&deviceCount);
+            if (FAILED(pCollection->GetCount(&deviceCount))) enumerationComplete = false;
             
             // Monitor all active audio devices
             for (UINT deviceIdx = 0; deviceIdx < deviceCount; deviceIdx++) {
@@ -204,7 +219,7 @@ void SoundTracker::MonitorAudioSessions() {
                         
                         if (SUCCEEDED(hr)) {
                             int sessionCount = 0;
-                            pSessionEnumerator->GetCount(&sessionCount);
+                            if (FAILED(pSessionEnumerator->GetCount(&sessionCount))) enumerationComplete = false;
                             
                             for (int i = 0; i < sessionCount; i++) {
                                 IAudioSessionControl* pSessionControl = nullptr;
@@ -213,35 +228,75 @@ void SoundTracker::MonitorAudioSessions() {
                                     pSessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pSessionControl2);
                                     
                                     if (pSessionControl2) {
-                                        ProcessAudioSession(pSessionControl2);
+                                        if (!ProcessAudioSession(pSessionControl2)) enumerationComplete = false;
                                         pSessionControl2->Release();
+                                    } else {
+                                        enumerationComplete = false;
                                     }
                                     pSessionControl->Release();
+                                } else {
+                                    enumerationComplete = false;
                                 }
                             }
                             pSessionEnumerator->Release();
+                        } else {
+                            enumerationComplete = false;
                         }
                         pSessionManager->Release();
+                    } else {
+                        enumerationComplete = false;
                     }
                     pDevice->Release();
+                } else {
+                    enumerationComplete = false;
                 }
             }
             pCollection->Release();
+        } else {
+            enumerationComplete = false;
         }
+        RemoveInactiveSessions(enumerationComplete);
         
         // Reduced polling interval for better performance with multiple devices
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
+    m_activeEvents.clear();
+    enumerator->Release();
+    CoUninitialize();
 }
 
-void SoundTracker::ProcessAudioSession(IAudioSessionControl2* pSessionControl) {
+void SoundTracker::RemoveInactiveSessions(bool enumerationComplete) {
+    for (auto it = m_activeEvents.begin(); it != m_activeEvents.end();) {
+        const auto& registration = *it->second;
+        AudioSessionState state = AudioSessionStateInactive;
+        HRESULT hr = registration.control->GetState(&state);
+        if ((enumerationComplete && !registration.seen) ||
+            registration.events->_disconnected ||
+            (SUCCEEDED(hr) && state == AudioSessionStateExpired) ||
+            hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+            it = m_activeEvents.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool SoundTracker::ProcessAudioSession(IAudioSessionControl2* pSessionControl) {
+    LPWSTR instanceId = nullptr;
+    HRESULT idResult = pSessionControl->GetSessionInstanceIdentifier(&instanceId);
+    std::wstring sessionId;
+    if (SUCCEEDED(idResult) && instanceId) sessionId = instanceId;
+    CoTaskMemFree(instanceId);
+    auto existing = m_activeEvents.find(sessionId);
+    if (existing != m_activeEvents.end()) existing->second->seen = true;
+
     DWORD processId = 0;
     HRESULT hr = pSessionControl->GetProcessId(&processId);
     
     // Process even if processId is 0 (system sounds)
     if (SUCCEEDED(hr)) {
-        AudioSessionState state;
-        pSessionControl->GetState(&state);
+        AudioSessionState state = AudioSessionStateInactive;
+        HRESULT stateResult = pSessionControl->GetState(&state);
         
         if (state == AudioSessionStateActive) {
             ISimpleAudioVolume* pVolume = nullptr;
@@ -276,21 +331,25 @@ void SoundTracker::ProcessAudioSession(IAudioSessionControl2* pSessionControl) {
         // Store session name for event creation
         if (!sessionName.empty() && processId == 0) {
             // For system sounds, use session name as hint
+            std::lock_guard<std::mutex> lock(m_cacheMutex);
             m_sessionNames[0] = sessionName;
         }
         
-        // Register for events and store for cleanup
-        CSoundTrackerAudioSessionEvents* pEvents = new CSoundTrackerAudioSessionEvents(this, processId);
-        if (SUCCEEDED(pSessionControl->RegisterAudioSessionNotification(pEvents))) {
-            // Store for cleanup - AddRef the session control
-            pSessionControl->AddRef();
-            std::lock_guard<std::mutex> lock(m_eventsMutex);
-            m_activeEvents.push_back(std::make_pair(pSessionControl, pEvents));
-        } else {
-            // Registration failed, clean up
-            pEvents->Release();
+        // Poll every time, but register only once per live session instance.
+        if (!sessionId.empty() && existing == m_activeEvents.end() &&
+            SUCCEEDED(stateResult) && state != AudioSessionStateExpired) {
+            auto registration = std::make_unique<SessionRegistration>();
+            registration->events = new CSoundTrackerAudioSessionEvents(this, processId);
+            if (SUCCEEDED(pSessionControl->RegisterAudioSessionNotification(registration->events))) {
+                pSessionControl->AddRef();
+                registration->control = pSessionControl;
+                registration->seen = true;
+                m_activeEvents.emplace(sessionId, std::move(registration));
+            }
         }
     }
+    // An unidentified session makes the snapshot incomplete for removal purposes.
+    return !sessionId.empty();
 }
 
 float SoundTracker::GetPeakMeterValue(IAudioSessionControl2* pSessionControl) {
@@ -567,10 +626,13 @@ void SoundTracker::AddAudioEvent(DWORD processId, float volume, float peak) {
         event.browserTabInfo = GetBrowserTabInfo(processId, event.processName);
         
         // Add session name to description if available
-        auto sessionIt = m_sessionNames.find(processId);
-        if (sessionIt != m_sessionNames.end() && !sessionIt->second.empty()) {
-            event.sessionDisplayName = sessionIt->second;
-            event.soundDescription += L" [" + sessionIt->second + L"]";
+        {
+            std::lock_guard<std::mutex> lock(m_cacheMutex);
+            auto sessionIt = m_sessionNames.find(processId);
+            if (sessionIt != m_sessionNames.end() && !sessionIt->second.empty()) {
+                event.sessionDisplayName = sessionIt->second;
+                event.soundDescription += L" [" + sessionIt->second + L"]";
+            }
         }
         
         // Add USB info to description if available

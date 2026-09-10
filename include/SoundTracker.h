@@ -27,9 +27,12 @@ public:
     LONG _cRef;
     class SoundTracker* _pTracker;
     DWORD _processId;
+    std::mutex _trackerMutex;
+    std::atomic<bool> _disconnected{false};
 
     CSoundTrackerAudioSessionEvents(class SoundTracker* pTracker, DWORD processId);
     ~CSoundTrackerAudioSessionEvents();
+    void Detach();
 
     // IUnknown methods
     ULONG STDMETHODCALLTYPE AddRef();
@@ -54,18 +57,26 @@ private:
     std::mutex m_cacheMutex;  // Separate mutex for process cache to avoid deadlock
     std::vector<AudioEvent> m_events;
     IMMDeviceEnumerator* m_pEnumerator;
+    bool m_comInitialized = false;
     std::unordered_map<DWORD, std::wstring> m_processCache;
     std::unordered_map<DWORD, std::wstring> m_sessionNames;  // Store session display names
     std::chrono::system_clock::time_point m_startTime;
     std::wstring m_logFilePath;
     std::unique_ptr<class Logger> m_logger;  // Single logger instance for efficiency
     
-    // Store active audio session events for proper cleanup
-    std::vector<std::pair<IAudioSessionControl2*, CSoundTrackerAudioSessionEvents*>> m_activeEvents;
-    std::mutex m_eventsMutex;
+    struct SessionRegistration {
+        IAudioSessionControl2* control = nullptr;
+        CSoundTrackerAudioSessionEvents* events = nullptr;
+        bool seen = false;
+        ~SessionRegistration();
+    };
+    // Session instance IDs remain stable across enumerations; COM pointers need not.
+    // Only the monitor thread owns and removes registrations.
+    std::unordered_map<std::wstring, std::unique_ptr<SessionRegistration>> m_activeEvents;
 
     void MonitorAudioSessions();
-    void ProcessAudioSession(IAudioSessionControl2* pSessionControl);
+    bool ProcessAudioSession(IAudioSessionControl2* pSessionControl);
+    void RemoveInactiveSessions(bool enumerationComplete);
     std::wstring GetProcessNameFromPID(DWORD processId);
     std::wstring GetProcessPathFromPID(DWORD processId);
     std::wstring GetSoundDescription(DWORD processId, const std::wstring& processName);
