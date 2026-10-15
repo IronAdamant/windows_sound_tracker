@@ -1,5 +1,6 @@
 # Build directories
 build/
+build_*/
 build_gui/
 standalone/
 out/
@@ -49,6 +50,9 @@ cmake_install.cmake
 Makefile
 
 # Temporary files
+/RC*
+*.dmp
+SoundTracker.ini
 *.tmp
 *.temp
 ~*
@@ -62,3 +66,5 @@ Desktop.ini
 SoundTracker_Portable/
 SoundTracker_Portable.zip
 *.zip
+# Local packaged builds
+dist/

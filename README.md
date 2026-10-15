@@ -1,213 +1,173 @@
-# Windows 11 Sound Tracker
+# Windows Sound Tracker
 
-A powerful Windows application that tracks and logs ALL system sounds in real-time, helping you identify exactly which program is making sounds on your computer.
+A Windows app that shows which program is making each sound, and can highlight
+the window it came from: useful for tracking down mystery noises, and for telling
+identical windows apart (for example several game clients played at once).
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
-![Language](https://img.shields.io/badge/language-C%2B%2B-orange)
+![Language](https://img.shields.io/badge/language-C%2B%2B17-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-## 🚀 Latest Update (v1.1.0)
+## What's new in 1.2.0
 
-**New Features:**
-- **USB Device Detection**: Identifies specific USB devices and ports making sounds
-- **Browser Tab Tracking**: Shows which browser tab is playing audio (privacy-respecting)
-- **Clickable Log Path**: Click the CSV path in status bar to open file location
+- **Window Alerts**: when a chosen program gets loud after being quiet, its window
+  gets a coloured, click-through border and its taskbar button flashes. Built for
+  multiboxing (which of five game clients just played the fishing splash?) but works
+  with any app. Includes a live per-window level meter for tuning.
+- **Much more accurate detection**: audio levels are sampled every 20 ms instead of
+  250 ms, so short sounds aren't missed. Each sound is logged once with its start
+  time, duration and peak, instead of a row every quarter second.
+- **Real device attribution**: "device connected/disconnected" system sounds name the
+  device that actually changed (the old version guessed the first USB device).
+- **Window titles for every app** (browsers included, via their audio helper process).
+- **Debug logging** for troubleshooting: three levels, crash logs with minidumps, and
+  a reason logged for every alert decision. See [docs/TESTING.md](docs/TESTING.md).
+- **No administrator rights needed**, settings are saved, single instance, new icon.
+- **SoundBeacon** test tool for trying Window Alerts on several windows without a game.
 
-## 🎯 Features
+## Features
 
-- **Real-Time Sound Monitoring**: Tracks every sound from every application
-- **Detailed Information**: Shows process name, PID, file path, and volume levels
-- **Smart Event Batching**: Groups multiple events from the same process within the same minute
-- **System Sounds Detection**: Catches Windows notifications, USB connections, and keyboard sounds
-- **USB Device Identification**: Shows which USB device and port is making sounds
-- **Browser Tab Detection**: Displays which browser tab is playing audio (privacy-respecting)
-- **Automatic CSV Logging**: Continuously logs to CSV file in logs folder
-- **Click-to-Copy**: Click any row to copy all its data to clipboard
-- **Clickable Log Path**: Click the CSV path in status bar to open file location (when stopped)
-- **System Tray Support**: Minimize to system tray for background monitoring
-- **Filtering**: Search for sounds from specific applications
-- **Session-Based Logging**: Each tracking session creates a new timestamped CSV file
-
-## 📸 Screenshots
+- Real-time list of every sound: time, duration, process, PID, window, description,
+  peak level, volume, output device, path
+- Window Alerts with per-rule trigger level, quiet-before, cooldown, ignore-after-input,
+  border colour/thickness/duration, taskbar flash
+- Automatic CSV log of every sound (`logs/sound_log_*.csv`)
+- Filter by process, window title or description; click a row to copy it
+- System tray mode; optional start-tracking-on-launch
+- Works with every output device at once, follows device changes and unplugging
 
 ![Windows Sound Tracker UI](images/windows_sound_tracker_ui.png)
 
-The application shows a real-time list of all sounds with columns for:
-- **Time**: When the sound occurred (HH:MM format)
-- **Count**: Number of events batched together (same process, same minute)
-- **Process**: Application name
-- **PID**: Process ID
-- **Description**: Human-readable description
-- **Volume/Peak**: Sound levels (0-100%)
-- **Path**: Full executable path
+## Quick start
 
-## 🚀 Quick Start
+1. Download `SoundTracker.exe` from [Releases](https://github.com/IronAdamant/windows_sound_tracker/releases) and run it (no install or admin rights needed).
+2. Click **Start Tracking** and play something.
+3. For window highlighting: **Window Alerts... → Add**, enter the process name (e.g. `Wow.exe`), set a trigger level, **Save rule**.
 
-### Download Pre-built Release
-1. Download `SoundTracker.exe` from the [Releases](https://github.com/IronAdamant/windows_sound_tracker/releases) page
-2. Double-click to run (will request Administrator privileges)
-3. Click "Start Tracking" to begin monitoring
+Settings and logs are kept next to the exe (portable). If that folder isn't writable,
+for example under Program Files, they go to `%LOCALAPPDATA%\WindowsSoundTracker` instead.
 
-### Build from Source
+## Window Alerts
 
-**Requirements:**
-- Windows 10/11
-- Visual Studio 2022 (Community Edition or higher)
-- CMake 3.20+ (included with Visual Studio)
+Each rule watches processes by name (wildcards `*` `?`, several names separated by `;`).
+An alert fires when the process's audio peak reaches the **trigger level** after it has
+been below that level for at least **quiet before** milliseconds. Then:
 
-#### Option 1: Visual Studio GUI
+- a border is drawn over the window(s) of that process, labelled with the rule and PID
+  (the border is a separate see-through window: clicks pass through it, and the other
+  program is never touched);
+- the taskbar button flashes until you switch to that window.
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/IronAdamant/windows_sound_tracker.git
-   ```
+| Setting | What it does |
+|---|---|
+| Trigger level (%) | Peak level that counts as "the sound". Watch **Recent max** in the live list while the sound plays and set it a bit below that. |
+| Quiet before (ms) | The window must be quieter than the trigger level this long first. Stops continuous audio (music) from alerting repeatedly. |
+| Must stay loud (ms) | Ignore clicks/blips shorter than this. |
+| Cooldown (ms) | Minimum gap between alerts for the same window. |
+| Ignore after input (ms) | Skip sounds that start this soon after a key press or mouse click, either in the window you're using or in all windows. Use it for sounds you cause yourself (e.g. casting). |
 
-2. **Open in Visual Studio:**
-   - Launch Visual Studio 2022
-   - Select "Open a local folder"
-   - Navigate to the cloned repository folder
-   - Visual Studio will automatically detect CMakeLists.txt
+**Identify all windows** (in the Window Alerts window) draws a labelled border on every
+window that currently has audio, which is a quick way to check the PID-to-window mapping.
 
-3. **Build the project:**
-   - Select `x64-Release` from the configuration dropdown
-   - Go to `Build → Build All` (or press `Ctrl+Shift+B`)
-   - The executable will be in `out\build\x64-Release\bin\SoundTracker.exe`
+### Limits worth knowing
 
-#### Option 2: VS Code with CMake Extension
+- Windows reports loudness **per process**, not per sound. A rule can't tell a splash
+  from another equally loud sound in the same window. That's why the game setup below matters.
+- All windows/tabs of one browser instance share one audio process, so those windows
+  can't be told apart. Separate game clients (separate processes) can.
+- The border can't be drawn over minimized windows, windows on other virtual desktops,
+  or (possibly) exclusive-fullscreen games. Use windowed or borderless windowed mode.
 
-1. **Install extensions:**
-   - Install "C/C++" extension by Microsoft
-   - Install "CMake Tools" extension by Microsoft
+### World of Warcraft multiboxing (fishing splash)
 
-2. **Open the project:**
-   - Open VS Code
-   - File → Open Folder → Select the repository folder
+Each WoW client is its own `Wow.exe` process, so Sound Tracker can tell which window
+splashed. In **every** client:
 
-3. **Configure and build:**
-   - Press `Ctrl+Shift+P` → "CMake: Configure"
-   - Select "Visual Studio Community 2022 Release - amd64"
-   - Press `Ctrl+Shift+P` → "CMake: Build"
-   - Or use the CMake sidebar for build options
+1. **Turn on sound in background.** WoW mutes itself when its window isn't focused,
+   and this is **off by default**. Turn on the Sound in Background option in the
+   game's audio settings, or type
+   `/console Sound_EnableSoundWhenGameIsInBG 1`.
+2. Turn **Music**, **Ambience** and **Dialog** off (or very low) and keep **Sound
+   Effects** on, so the splash is the loudest thing that client plays.
+3. Use **Windowed** or **Windowed (Fullscreen)** display mode.
 
-#### Option 3: Command Line (Developer PowerShell)
+Then in Sound Tracker: **Window Alerts... → WoW preset → Save rule**, start tracking,
+cast in each window and watch **Recent max** when the splash happens. Set the trigger
+level a little below the splash and above everything else. The preset ignores sounds
+that start within 1.2 s of your own key press or click in that window, so your own cast
+sound doesn't trigger it.
 
-1. **Open Developer PowerShell for VS 2022:**
-   - From Start Menu → Visual Studio 2022 → Developer PowerShell
+The preset matches `Wow.exe`, `WowClassic.exe` and their PTR/beta versions. The debug
+log's `Session added` lines show the exact process name if yours differs.
 
-2. **Build with CMake:**
-   ```powershell
-   cd path\to\windows_sound_tracker
-   mkdir build
-   cd build
-   cmake .. -G "Visual Studio 17 2022" -A x64
-   cmake --build . --config Release
-   ```
+## Build from source
 
-3. **The executable will be in `build\bin\Release\SoundTracker.exe`**
-
-#### Building a Portable Version
-
-For a standalone executable with no dependencies:
+**Visual Studio 2022 or later** (Developer PowerShell):
 
 ```powershell
-# In Developer PowerShell
-cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded"
-cmake --build . --config Release -- /p:RuntimeLibrary=MT
+cmake -S . -B build -A x64
+cmake --build build --config Release
+ctest --test-dir build -C Release      # unit tests
+# build\bin\Release\SoundTracker.exe and SoundBeacon.exe
 ```
 
-## 💻 Usage
+Or run `build_release.bat`. Visual Studio's "Open a local folder" and VS Code's CMake
+Tools also work with the CMakeLists.txt.
 
-1. **Start the Application**: Double-click SoundTracker.exe (auto-elevates to Administrator)
-2. **Begin Monitoring**: Click the "Start Tracking" button
-3. **View Events**: Watch the real-time list populate with sound events
-4. **Filter Results**: Check "Filter" and enter a process name to focus on specific apps
-5. **Stop Tracking**: Click "Stop Tracking" to end the session and save logs
-6. **Background Mode**: Minimize to system tray for unobtrusive monitoring
+**MinGW-w64 / llvm-mingw** (gcc or clang):
 
-### Log Files
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
 
-- **Automatic Logging**: All sound events are automatically saved to CSV files
-- **Location**: Logs are stored in the `logs` folder in the same directory as the executable
-- **File Format**: `sound_log_YYYY-MM-DD_HHMMSS.csv` (one file per tracking session)
-- **Access Logs**: The status bar shows the current log file path
-- **Quick Access**: When tracking is stopped, click the log path in the status bar to open the file location
+Every push is built and unit-tested by GitHub Actions; tags `v*` publish a release.
 
-### Keyboard Shortcuts
-- **Double-click system tray icon**: Restore window
-- **Right-click system tray icon**: Quick menu
+## CSV log format
 
-## 📊 CSV Log Format
-
-All tracking sessions are automatically saved as CSV files with the following format:
+One row per sound, written when the sound ends:
 
 ```csv
-Timestamp,EventCount,ProcessID,ProcessName,ProcessPath,Description,SessionName,VolumeLevel,PeakLevel,IsSystemSound,USBDevice,BrowserTab
-2025-01-05 14:23:45.123,1,12345,Discord.exe,C:\...\Discord.exe,Discord Voice/Message,,65%,72%,No,,
-2025-01-05 14:23:46.789,1,0,Unknown,,"Windows System Sound - USB: SanDisk Cruzer (Port 2)",,50%,55%,Yes,"USB: SanDisk Cruzer (Port 2)",
-2025-01-05 14:23:47.456,1,5678,chrome.exe,C:\...\chrome.exe,"Chrome Audio - Tab: ""YouTube - Best Music Mix""",,80%,85%,No,,"Tab: ""YouTube - Best Music Mix"""
+StartTime,DurationMs,ProcessID,ProcessName,ProcessPath,Description,SessionName,WindowTitle,OutputDevice,VolumeLevel,PeakLevel,IsSystemSound,DeviceChange,AlertsFired
+2026-10-15 13:09:39.704,795,27536,Wow.exe,C:\...\Wow.exe,World of Warcraft,,World of Warcraft,Speakers (Realtek(R) Audio),100.0%,33.9%,No,,1
 ```
 
-**Column Descriptions:**
-- **Timestamp**: Full date and time when the sound occurred
-- **EventCount**: Number of sounds batched together (same process, same minute)
-- **ProcessID**: Windows Process ID
-- **ProcessName**: Executable name
-- **ProcessPath**: Full path to the executable
-- **Description**: Human-readable description of the sound source
-- **SessionName**: Audio session name (if available)
-- **VolumeLevel**: Current volume percentage (0-100%)
-- **PeakLevel**: Peak audio level percentage (0-100%)
-- **IsSystemSound**: Whether it's a Windows system sound
-- **USBDevice**: USB device information if the sound is from a USB device
-- **BrowserTab**: Browser tab title if the sound is from a web browser
+## Troubleshooting and testing
 
-## 🔧 Technical Details
+See **[docs/TESTING.md](docs/TESTING.md)** for the debug log levels, what to look for
+in the logs, the SoundBeacon multi-window test, and a browser test checklist.
 
-- **Audio API**: Windows Core Audio APIs (WASAPI)
-- **GUI Framework**: Native Win32 API
-- **Language**: C++17
-- **Privileges**: Requires Administrator access for system-wide monitoring
+Command-line options: `--start`, `--debug`, `--verbose`, `--data-dir=PATH`,
+`--exit-after=N`, `--test-crash` (checks crash logging). Run `SoundTracker.exe --help`.
 
-### How It Works
-1. Enumerates all audio endpoints using `IMMDeviceEnumerator`
-2. Monitors audio sessions via `IAudioSessionManager2`
-3. Tracks volume changes and peak levels
-4. Identifies process information for each sound
-5. Batches events occurring within the same minute
+## How it works
 
-## 🤝 Contributing
+1. A background thread enumerates every output device (`IMMDeviceEnumerator`) and
+   audio session (`IAudioSessionManager2`), and gets notified of new sessions and
+   device changes.
+2. Each session's peak meter (`IAudioMeterInformation`) is sampled every 20 ms with a
+   high-resolution timer.
+3. Readings become sounds (start, duration, peak) for the list and CSV, and are run
+   through the alert rules (see `src/SoundDetector.cpp`, unit tested in `tests/`).
+4. A session's process is mapped to its window. Browsers and Electron apps play audio
+   from a windowless child process, so the tracker walks up to the parent.
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+## Privacy
 
-### Development Setup
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+Only metadata is recorded: which program made a sound, when and how loud. No audio
+is recorded or sent anywhere. Window titles (e.g. browser tab names) appear in the
+list and logs; turn off **Options → Record Window Titles** if you don't want that.
 
-## 📝 License
+## Contributing
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+Contributions are welcome. Please open an issue or pull request.
 
-## 🙏 Acknowledgments
+## License
 
-- Windows Core Audio APIs documentation
-- Win32 API reference
+MIT. See [LICENSE](LICENSE).
+
+## Acknowledgments
+
+- Windows Core Audio API documentation
 - Community feedback and testing
 - Created with the assistance of AI (Claude) for code development and optimization
-
-## ⚠️ Privacy Note
-
-This tool monitors audio metadata only (which programs are making sounds), not the actual audio content. No audio is recorded or transmitted.
-
-## 🐛 Known Issues
-
-- Default Windows application icon (custom icon welcome via PR!)
-- Settings are not persistent between sessions
-
-## 📞 Support
-
-- **Issues**: Please use the [GitHub Issues](https://github.com/IronAdamant/windows_sound_tracker/issues) page
-- **Questions**: Start a [Discussion](https://github.com/IronAdamant/windows_sound_tracker/discussions)
-- **Security**: See SECURITY.md for reporting vulnerabilities
