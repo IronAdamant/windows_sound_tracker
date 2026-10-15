@@ -1,106 +1,97 @@
 cmake_minimum_required(VERSION 3.20)
-project(WindowsSoundTracker)
+
+# Static MSVC runtime so SoundTracker.exe runs without the VC++ redistributable.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+project(WindowsSoundTracker VERSION 1.2.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Set Windows specific flags
-if(WIN32)
-    add_definitions(-DUNICODE -D_UNICODE)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc")
-    
-    # Force static runtime linking for standalone executable
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
-    
-    # Remove any default runtime library flags
-    string(REGEX REPLACE "/MD" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-    string(REGEX REPLACE "/MDd" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
-    string(REGEX REPLACE "/MD" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
-    
-    # Explicitly set static runtime flags
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
+option(SOUNDTRACKER_BUILD_TESTS "Build unit tests" ON)
+option(SOUNDTRACKER_BUILD_TOOLS "Build the SoundBeacon test tool" ON)
+
+if(NOT WIN32)
+    message(FATAL_ERROR "Windows Sound Tracker only builds on Windows")
 endif()
 
-# GUI version only
+# Windows 10+ APIs, Unicode everywhere.
+add_compile_definitions(UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00 NTDDI_VERSION=0x0A000006)
 
-# Common source files
-set(COMMON_SOURCES
-    src/SoundTracker.cpp
-    src/Logger.cpp
-)
+if(MSVC)
+    add_compile_options(/EHsc /W4 /utf-8 /permissive-)
+else()
+    # MinGW (gcc or clang)
+    add_compile_options(-Wall -Wextra)
+endif()
 
-# Common header files
-set(COMMON_HEADERS
-    include/AudioEvent.h
-    include/SoundTracker.h
-    include/Logger.h
-)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# GUI version
+# Detection logic shared with the unit tests (no Windows audio dependencies).
+add_library(soundtracker_detection STATIC src/SoundDetector.cpp include/SoundDetector.h)
+target_include_directories(soundtracker_detection PUBLIC include)
+
 set(SOURCES
     src/main_gui.cpp
     src/SoundTrackerGUI.cpp
-    ${COMMON_SOURCES}
+    src/SoundTracker.cpp
+    src/AlertOverlay.cpp
+    src/AlertsDialog.cpp
+    src/DebugLog.cpp
+    src/DeviceWatcher.cpp
+    src/Logger.cpp
+    src/ProcessInfo.cpp
+    src/Settings.cpp
 )
 
 set(HEADERS
+    include/AlertOverlay.h
+    include/AlertsDialog.h
+    include/AudioEvent.h
+    include/ComPtr.h
+    include/CoreAudioCompat.h
+    include/DebugLog.h
+    include/DeviceWatcher.h
+    include/Logger.h
+    include/ProcessInfo.h
+    include/Settings.h
+    include/SoundTracker.h
     include/SoundTrackerGUI.h
-    ${COMMON_HEADERS}
+    include/Version.h
 )
 
-# Add resource file
-set(RESOURCES
-    SoundTracker.rc
-    resource.h
+add_executable(SoundTracker WIN32 ${SOURCES} ${HEADERS} SoundTracker.rc resource.h)
+target_include_directories(SoundTracker PRIVATE include ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(SoundTracker PRIVATE
+    soundtracker_detection
+    ole32 oleaut32 uuid
+    user32 gdi32 comctl32 comdlg32 shell32 shlwapi advapi32
+    psapi cfgmgr32 dwmapi shcore
 )
+# The manifest is embedded through SoundTracker.rc on every toolchain.
+set_source_files_properties(SoundTracker.rc PROPERTIES OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/SoundTracker.manifest;${CMAKE_CURRENT_SOURCE_DIR}/resources/app.ico")
 
-# Create GUI executable
-add_executable(SoundTracker WIN32 ${SOURCES} ${HEADERS} ${RESOURCES})
+if(MSVC)
+    target_link_options(SoundTracker PRIVATE /MANIFEST:NO)
+else()
+    target_link_options(SoundTracker PRIVATE -municode -static)
+endif()
 
-# GUI-specific libraries
-target_link_libraries(SoundTracker
-    comctl32
-    comdlg32
-    shell32
-)
-
-# Include directories
-target_include_directories(SoundTracker PRIVATE include)
-
-# Common Windows libraries
-if(WIN32)
-    target_link_libraries(SoundTracker
-        ole32
-        winmm
-        psapi
-        kernel32
-        user32
-        gdi32
-        winspool
-        advapi32
-        uuid
-        oleaut32
-        setupapi
-        cfgmgr32
-    )
-    
-    # Add manifest file for admin privileges
-    if(MSVC)
-        set_target_properties(SoundTracker PROPERTIES
-            LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\" /SUBSYSTEM:WINDOWS"
-        )
-        
-        # Embed manifest
-        add_custom_command(TARGET SoundTracker POST_BUILD
-            COMMAND mt.exe -manifest "${CMAKE_CURRENT_SOURCE_DIR}/SoundTracker.manifest" 
-                           -outputresource:"$<TARGET_FILE:SoundTracker>" -nologo
-            COMMENT "Embedding manifest for admin privileges"
-        )
+if(SOUNDTRACKER_BUILD_TOOLS)
+    add_executable(SoundBeacon WIN32 tools/sound_beacon/SoundBeacon.cpp)
+    target_link_libraries(SoundBeacon PRIVATE winmm user32 gdi32 shell32)
+    if(NOT MSVC)
+        target_link_options(SoundBeacon PRIVATE -municode -static)
     endif()
 endif()
 
-# Set output directory
-set_target_properties(SoundTracker PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-)
+if(SOUNDTRACKER_BUILD_TESTS)
+    enable_testing()
+    add_executable(test_detection tests/test_detection.cpp)
+    target_link_libraries(test_detection PRIVATE soundtracker_detection)
+    if(NOT MSVC)
+        target_link_options(test_detection PRIVATE -static)
+    endif()
+    add_test(NAME detection COMMAND test_detection)
+endif()

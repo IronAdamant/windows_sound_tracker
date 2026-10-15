@@ -1,311 +1,271 @@
-#include "../include/SoundTrackerGUI.h"
-#include "../include/Logger.h"
-#include "../resource.h"
-#include <sstream>
-#include <iomanip>
-#include <algorithm>
-#include <commdlg.h>
-#include <shlobj.h>
-#include <windowsx.h>
+#include "SoundTrackerGUI.h"
 
-SoundTrackerGUI::SoundTrackerGUI() 
-    : m_hWnd(nullptr), m_hListView(nullptr), m_hButtonStartStop(nullptr),
-      m_hButtonClear(nullptr), m_hStatusBar(nullptr),
-      m_hFilterCheckbox(nullptr), m_hFilterEdit(nullptr), m_hFont(nullptr),
-      m_hBoldFont(nullptr), m_hIcon(nullptr), m_trayIcon({}), m_inTray(false),
-      m_isTracking(false), m_updateThreadRunning(false),
-      m_lastEventCount(0), m_filterEnabled(false), m_originalStatusProc(nullptr) {
-    m_tracker = std::make_unique<SoundTracker>();
-    m_lastUpdateTime = std::chrono::system_clock::now();
+#include <windowsx.h>
+#include <algorithm>
+#include <cwctype>
+
+#include "../resource.h"
+#include "DebugLog.h"
+#include "ProcessInfo.h"
+#include "Version.h"
+
+namespace {
+
+const wchar_t* kWindowClass = L"SoundTrackerWindow";
+const wchar_t* kTestingGuideUrl = L"https://github.com/IronAdamant/windows_sound_tracker/blob/master/docs/TESTING.md";
+
+enum Column { ColTime, ColDuration, ColProcess, ColPid, ColWindow, ColDescription, ColPeak, ColVolume, ColAlerts, ColDevice, ColPath, ColCount };
+
+// The active level can come from --debug/--verbose without being saved.
+int CurrentPreset() {
+    switch (dbg::GetLevel()) {
+        case dbg::Level::Trace: return 2;
+        case dbg::Level::Debug: return 1;
+        default: return 0;
+    }
 }
+
+std::wstring Lower(std::wstring s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+    return s;
+}
+
+}  // namespace
+
+SoundTrackerGUI::SoundTrackerGUI(Settings& settings) : m_settings(settings) {}
 
 SoundTrackerGUI::~SoundTrackerGUI() {
-    Cleanup();
+    if (m_tracker) m_tracker->Stop();
+    m_alertsDialog.reset();
+    m_overlays.reset();
+    if (m_hFont) DeleteObject(m_hFont);
+    if (m_hBoldFont) DeleteObject(m_hBoldFont);
 }
 
-bool SoundTrackerGUI::Initialize(HINSTANCE hInstance) {
-    // Initialize common controls
-    INITCOMMONCONTROLSEX icex = { 0 };
-    icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES;
+bool SoundTrackerGUI::Initialize(HINSTANCE hInstance, const LaunchOptions& options) {
+    m_instance = hInstance;
+    INITCOMMONCONTROLSEX icex{};
+    icex.dwSize = sizeof(icex);
+    icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icex);
-    
-    // Initialize sound tracker
-    if (!m_tracker->Initialize()) {
-        MessageBox(nullptr, L"Failed to initialize audio monitoring system.", 
-                  L"Error", MB_ICONERROR);
-        return false;
-    }
-    
-    // Create main window
+
+    m_tracker = std::make_unique<SoundTracker>(AppPaths::LogsDir());
+    m_tracker->SetDetection(m_settings.detection);
+    m_tracker->SetRules(m_settings.alerts);
+    m_tracker->SetRecordWindowTitles(m_settings.recordWindowTitles);
+
     if (!CreateMainWindow(hInstance)) {
+        LOG_ERROR("ui", L"Cannot create main window: " << dbg::Win32ErrorToString(GetLastError()));
         return false;
     }
-    
-    // Start update thread
-    m_updateThreadRunning = true;
-    m_updateThread = std::thread(&SoundTrackerGUI::UpdateThreadProc, this);
-    
+
+    HWND target = m_hWnd;
+    m_tracker->SetAlertCallback([target](const AlertFire& fire) {
+        auto* copy = new AlertFire(fire);
+        if (!PostMessageW(target, WM_APP_ALERT, 0, reinterpret_cast<LPARAM>(copy))) {
+            LOG_WARN("ui", L"Could not post alert to the main window: " << dbg::Win32ErrorToString(GetLastError()));
+            delete copy;
+        }
+    });
+    m_overlays = std::make_unique<AlertOverlayManager>(hInstance);
+    m_alertsDialog = std::make_unique<AlertsDialog>(hInstance, m_hWnd, *this);
+
+    SetTimer(m_hWnd, ID_TIMER_UPDATE, 250, nullptr);
+    if (options.exitAfterSeconds > 0) {
+        LOG_INFO("ui", L"Will exit automatically after " << options.exitAfterSeconds << L" s (--exit-after)");
+        SetTimer(m_hWnd, ID_TIMER_EXIT, static_cast<UINT>(options.exitAfterSeconds) * 1000, nullptr);
+    }
+    if (options.startTracking || m_settings.startTrackingOnLaunch) OnStartStop();
+    UpdateStatusBar();
     return true;
 }
 
 bool SoundTrackerGUI::CreateMainWindow(HINSTANCE hInstance) {
-    // Register window class
-    WNDCLASSEX wc = { 0 };
-    wc.cbSize = sizeof(WNDCLASSEX);
+    m_hIcon = static_cast<HICON>(LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+                                            GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0));
+    m_hIconSmall = static_cast<HICON>(LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+                                                 GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
+    if (!m_hIcon) m_hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    if (!m_hIconSmall) m_hIconSmall = m_hIcon;
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
-    wc.hIcon = LoadIcon(hInstance, IDI_APPLICATION);
+    wc.hIcon = m_hIcon;
+    wc.hIconSm = m_hIconSmall;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"SoundTrackerWindow";
-    wc.hIconSm = wc.hIcon;
-    
-    if (!RegisterClassEx(&wc)) {
-        return false;
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.lpszClassName = kWindowClass;
+    if (!RegisterClassExW(&wc)) return false;
+
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = 1300, h = 720;
+    if (m_settings.hasWindowRect && MonitorFromRect(&m_settings.windowRect, MONITOR_DEFAULTTONULL)) {
+        x = m_settings.windowRect.left;
+        y = m_settings.windowRect.top;
+        w = (std::max)(600L, m_settings.windowRect.right - m_settings.windowRect.left);
+        h = (std::max)(400L, m_settings.windowRect.bottom - m_settings.windowRect.top);
     }
-    
-    // Create window
-    m_hWnd = CreateWindowEx(
-        WS_EX_APPWINDOW,
-        L"SoundTrackerWindow",
-        L"Windows 11 Sound Tracker - Administrator",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        1200, 700,
-        nullptr, nullptr,
-        hInstance, this
-    );
-    
-    if (!m_hWnd) {
-        return false;
-    }
-    
-    // Create fonts
-    m_hFont = CreateFont(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    
-    m_hBoldFont = CreateFont(16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    
+
+    std::wstring title = std::wstring(APP_NAME_WSTR) + L" " + APP_VERSION_WSTR;
+    m_hWnd = CreateWindowExW(WS_EX_APPWINDOW, kWindowClass, title.c_str(), WS_OVERLAPPEDWINDOW, x, y, w, h, nullptr, nullptr,
+                             hInstance, this);
+    if (!m_hWnd) return false;
+
+    m_hFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                          CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    m_hBoldFont = CreateFontW(16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    CreateMenuBar();
     CreateControls();
+    LayoutControls();
     ShowWindow(m_hWnd, SW_SHOW);
     UpdateWindow(m_hWnd);
-    
     return true;
 }
 
+void SoundTrackerGUI::CreateMenuBar() {
+    m_hMenu = CreateMenu();
+    HMENU file = CreatePopupMenu();
+    AppendMenuW(file, MF_STRING, ID_MENU_START_STOP, L"&Start / Stop Tracking");
+    AppendMenuW(file, MF_STRING, ID_MENU_CLEAR, L"&Clear List");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, ID_MENU_OPEN_LOGS, L"Open &Logs Folder");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, ID_MENU_EXIT, L"E&xit");
+    AppendMenuW(m_hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
+
+    HMENU options = CreatePopupMenu();
+    AppendMenuW(options, MF_STRING, ID_MENU_ALERTS, L"Window &Alerts...");
+    AppendMenuW(options, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(options, MF_STRING, ID_MENU_AUTOSTART, L"Start Tracking on &Launch");
+    AppendMenuW(options, MF_STRING, ID_MENU_WINDOW_TITLES, L"Record &Window Titles");
+    HMENU debug = CreatePopupMenu();
+    AppendMenuW(debug, MF_STRING, ID_MENU_DEBUG_NORMAL, L"&Normal (errors, warnings, key events)");
+    AppendMenuW(debug, MF_STRING, ID_MENU_DEBUG_DEBUG, L"&Debug (every sound and alert decision)");
+    AppendMenuW(debug, MF_STRING, ID_MENU_DEBUG_VERBOSE, L"&Verbose (everything, incl. level envelopes)");
+    AppendMenuW(options, MF_POPUP, reinterpret_cast<UINT_PTR>(debug), L"&Debug Logging");
+    AppendMenuW(m_hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(options), L"&Options");
+
+    HMENU help = CreatePopupMenu();
+    AppendMenuW(help, MF_STRING, ID_MENU_OPEN_DEBUG_LOG, L"Show Current &Debug Log");
+    AppendMenuW(help, MF_STRING, ID_MENU_TESTING_GUIDE, L"&Testing Guide (web)");
+    AppendMenuW(help, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(help, MF_STRING, ID_MENU_ABOUT, L"&About");
+    AppendMenuW(m_hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Help");
+    SetMenu(m_hWnd, m_hMenu);
+    UpdateMenuChecks();
+}
+
+void SoundTrackerGUI::UpdateMenuChecks() {
+    if (!m_hMenu) return;
+    CheckMenuItem(m_hMenu, ID_MENU_AUTOSTART, m_settings.startTrackingOnLaunch ? MF_CHECKED : MF_UNCHECKED);
+    CheckMenuItem(m_hMenu, ID_MENU_WINDOW_TITLES, m_settings.recordWindowTitles ? MF_CHECKED : MF_UNCHECKED);
+    CheckMenuRadioItem(m_hMenu, ID_MENU_DEBUG_NORMAL, ID_MENU_DEBUG_VERBOSE, ID_MENU_DEBUG_NORMAL + CurrentPreset(), MF_BYCOMMAND);
+}
+
 void SoundTrackerGUI::CreateControls() {
-    // Create toolbar area
-    int buttonY = 10;
-    int buttonHeight = 35;
-    int buttonSpacing = 10;
-    
-    // Start/Stop button
-    m_hButtonStartStop = CreateWindow(
-        L"BUTTON", L"Start Tracking",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        10, buttonY, 150, buttonHeight,
-        m_hWnd, (HMENU)ID_BUTTON_START_STOP,
-        GetModuleHandle(nullptr), nullptr
-    );
-    SendMessage(m_hButtonStartStop, WM_SETFONT, (WPARAM)m_hBoldFont, TRUE);
-    
-    // Clear button (moved to where export was)
-    m_hButtonClear = CreateWindow(
-        L"BUTTON", L"Clear",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        170, buttonY, 80, buttonHeight,
-        m_hWnd, (HMENU)ID_BUTTON_CLEAR,
-        GetModuleHandle(nullptr), nullptr
-    );
-    SendMessage(m_hButtonClear, WM_SETFONT, (WPARAM)m_hFont, TRUE);
-    
-    // Filter checkbox
-    m_hFilterCheckbox = CreateWindow(
-        L"BUTTON", L"Filter:",
-        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        260, buttonY + 5, 70, 25,
-        m_hWnd, (HMENU)ID_CHECKBOX_FILTER,
-        GetModuleHandle(nullptr), nullptr
-    );
-    SendMessage(m_hFilterCheckbox, WM_SETFONT, (WPARAM)m_hFont, TRUE);
-    
-    // Filter edit box
-    m_hFilterEdit = CreateWindow(
-        L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-        340, buttonY + 3, 200, 28,
-        m_hWnd, (HMENU)ID_EDIT_FILTER,
-        GetModuleHandle(nullptr), nullptr
-    );
-    SendMessage(m_hFilterEdit, WM_SETFONT, (WPARAM)m_hFont, TRUE);
-    EnableWindow(m_hFilterEdit, FALSE);
-    
-    // Create ListView
+    auto button = [&](int id, const wchar_t* text, int x, int w, HFONT font) {
+        HWND h = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, x, 10, w, 35, m_hWnd,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), m_instance, nullptr);
+        SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        return h;
+    };
+    m_hButtonStartStop = button(ID_BUTTON_START_STOP, L"Start Tracking", 10, 150, m_hBoldFont);
+    m_hButtonAlerts = button(ID_BUTTON_ALERTS, L"Window Alerts...", 170, 140, m_hFont);
+    m_hButtonClear = button(ID_BUTTON_CLEAR, L"Clear", 320, 80, m_hFont);
+
+    m_hFilterCheckbox = CreateWindowExW(0, L"BUTTON", L"Filter:", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 415, 15,
+                                        70, 25, m_hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHECKBOX_FILTER)), m_instance, nullptr);
+    SendMessageW(m_hFilterCheckbox, WM_SETFONT, reinterpret_cast<WPARAM>(m_hFont), TRUE);
+    m_hFilterEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", m_settings.filterText.c_str(),
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 490, 13, 240, 28, m_hWnd,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_EDIT_FILTER)), m_instance, nullptr);
+    SendMessageW(m_hFilterEdit, WM_SETFONT, reinterpret_cast<WPARAM>(m_hFont), TRUE);
+    SendMessageW(m_hFilterEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"process, window or description"));
+    Button_SetCheck(m_hFilterCheckbox, m_settings.filterEnabled ? BST_CHECKED : BST_UNCHECKED);
+    EnableWindow(m_hFilterEdit, m_settings.filterEnabled);
+
     CreateListView();
-    
-    // Create Status Bar
     CreateStatusBar();
-    
-    // Create Tray Icon
     CreateTrayIcon();
 }
 
 void SoundTrackerGUI::CreateListView() {
-    m_hListView = CreateWindowEx(
-        WS_EX_CLIENTEDGE,
-        WC_LISTVIEW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | 
-        LVS_SHOWSELALWAYS | LVS_AUTOARRANGE,
-        10, 60, 0, 0,  // Size will be set in WM_SIZE
-        m_hWnd, (HMENU)ID_LISTVIEW,
-        GetModuleHandle(nullptr), nullptr
-    );
-    
-    // Set extended styles
-    ListView_SetExtendedListViewStyle(m_hListView, 
-        LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
-    
-    // Initialize columns
-    InitializeListViewColumns();
-    
-    // Set font
-    SendMessage(m_hListView, WM_SETFONT, (WPARAM)m_hFont, TRUE);
-}
-
-void SoundTrackerGUI::InitializeListViewColumns() {
-    LVCOLUMN lvc = { 0 };
-    lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-    
-    // Time column
-    lvc.pszText = (LPWSTR)L"Time";
-    lvc.cx = 100;
-    lvc.iSubItem = 0;
-    ListView_InsertColumn(m_hListView, 0, &lvc);
-    
-    // Count column (for batched events)
-    lvc.pszText = (LPWSTR)L"Count";
-    lvc.cx = 50;
-    lvc.iSubItem = 1;
-    ListView_InsertColumn(m_hListView, 1, &lvc);
-    
-    // Process column
-    lvc.pszText = (LPWSTR)L"Process";
-    lvc.cx = 150;
-    lvc.iSubItem = 2;
-    ListView_InsertColumn(m_hListView, 2, &lvc);
-    
-    // PID column
-    lvc.pszText = (LPWSTR)L"PID";
-    lvc.cx = 60;
-    lvc.iSubItem = 3;
-    ListView_InsertColumn(m_hListView, 3, &lvc);
-    
-    // Description column
-    lvc.pszText = (LPWSTR)L"Description";
-    lvc.cx = 250;
-    lvc.iSubItem = 4;
-    ListView_InsertColumn(m_hListView, 4, &lvc);
-    
-    // Volume column
-    lvc.pszText = (LPWSTR)L"Volume";
-    lvc.cx = 80;
-    lvc.iSubItem = 5;
-    ListView_InsertColumn(m_hListView, 5, &lvc);
-    
-    // Peak column
-    lvc.pszText = (LPWSTR)L"Peak";
-    lvc.cx = 80;
-    lvc.iSubItem = 6;
-    ListView_InsertColumn(m_hListView, 6, &lvc);
-    
-    // Path column
-    lvc.pszText = (LPWSTR)L"Path";
-    lvc.cx = 350;
-    lvc.iSubItem = 7;
-    ListView_InsertColumn(m_hListView, 7, &lvc);
+    m_hListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_OWNERDATA,
+                                  10, 55, 100, 100, m_hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_LISTVIEW)), m_instance, nullptr);
+    ListView_SetExtendedListViewStyle(m_hListView, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+    struct Col { const wchar_t* name; int width; };
+    const Col cols[ColCount] = {{L"Time", 75}, {L"Duration", 75}, {L"Process", 140}, {L"PID", 60}, {L"Window", 220},
+                                {L"Description", 220}, {L"Peak", 60}, {L"Volume", 60}, {L"Alerts", 50}, {L"Device", 170}, {L"Path", 320}};
+    for (int i = 0; i < ColCount; ++i) {
+        LVCOLUMNW c{};
+        c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        c.pszText = const_cast<LPWSTR>(cols[i].name);
+        c.cx = cols[i].width;
+        c.iSubItem = i;
+        ListView_InsertColumn(m_hListView, i, &c);
+    }
+    SendMessageW(m_hListView, WM_SETFONT, reinterpret_cast<WPARAM>(m_hFont), TRUE);
 }
 
 void SoundTrackerGUI::CreateStatusBar() {
-    m_hStatusBar = CreateWindowEx(
-        0, STATUSCLASSNAME, nullptr,
-        WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
-        0, 0, 0, 0,
-        m_hWnd, (HMENU)ID_STATUSBAR,
-        GetModuleHandle(nullptr), nullptr
-    );
-    
-    // Set parts
-    int parts[] = { 200, 400, 600, -1 };
-    SendMessage(m_hStatusBar, SB_SETPARTS, 4, (LPARAM)parts);
-    
-    // Initial text
-    SendMessage(m_hStatusBar, SB_SETTEXT, 0, (LPARAM)L"Status: Ready");
-    SendMessage(m_hStatusBar, SB_SETTEXT, 1, (LPARAM)L"Events: 0");
-    SendMessage(m_hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Duration: 00:00:00");
-    SendMessage(m_hStatusBar, SB_SETTEXT, 3, (LPARAM)L"Logs saved to: logs\\");
-    
-    // Subclass the status bar to handle clicks
-    SetWindowLongPtr(m_hStatusBar, GWLP_USERDATA, (LONG_PTR)this);
-    m_originalStatusProc = (WNDPROC)SetWindowLongPtr(m_hStatusBar, GWLP_WNDPROC, (LONG_PTR)StatusBarProc);
+    m_hStatusBar = CreateWindowExW(0, STATUSCLASSNAMEW, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0, m_hWnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_STATUSBAR)), m_instance, nullptr);
+    int parts[] = {250, 380, 520, 640, -1};
+    SendMessageW(m_hStatusBar, SB_SETPARTS, 5, reinterpret_cast<LPARAM>(parts));
+    SetWindowLongPtrW(m_hStatusBar, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    m_originalStatusProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(m_hStatusBar, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(StatusBarProc)));
 }
 
 void SoundTrackerGUI::CreateTrayIcon() {
-    m_trayIcon.cbSize = sizeof(NOTIFYICONDATA);
+    m_trayIcon.cbSize = sizeof(m_trayIcon);
     m_trayIcon.hWnd = m_hWnd;
     m_trayIcon.uID = ID_TRAY_ICON;
     m_trayIcon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     m_trayIcon.uCallbackMessage = WM_TRAYICON;
-    m_trayIcon.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    wcscpy_s(m_trayIcon.szTip, L"Sound Tracker - Click to restore");
+    m_trayIcon.hIcon = m_hIconSmall;
+    wcscpy_s(m_trayIcon.szTip, L"Sound Tracker - double-click to restore");
+}
+
+void SoundTrackerGUI::LayoutControls() {
+    if (!m_hListView || !m_hStatusBar) return;  // WM_SIZE arrives during window creation
+    RECT rc;
+    GetClientRect(m_hWnd, &rc);
+    SendMessageW(m_hStatusBar, WM_SIZE, 0, 0);
+    RECT status{};
+    GetWindowRect(m_hStatusBar, &status);
+    int statusHeight = status.bottom - status.top;
+    SetWindowPos(m_hListView, nullptr, 10, 55, (std::max)(0L, rc.right - 20), (std::max)(0L, rc.bottom - 55 - statusHeight - 8), SWP_NOZORDER);
 }
 
 LRESULT CALLBACK SoundTrackerGUI::WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    SoundTrackerGUI* pThis = nullptr;
-    
-    if (uMsg == WM_CREATE) {
-        CREATESTRUCT* pCreate = reinterpret_cast<CREATESTRUCT*>(lParam);
-        pThis = reinterpret_cast<SoundTrackerGUI*>(pCreate->lpCreateParams);
-        SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
+    SoundTrackerGUI* self = nullptr;
+    if (uMsg == WM_NCCREATE) {
+        self = static_cast<SoundTrackerGUI*>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        self->m_hWnd = hWnd;
     } else {
-        pThis = reinterpret_cast<SoundTrackerGUI*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+        self = reinterpret_cast<SoundTrackerGUI*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
     }
-    
-    if (pThis) {
-        return pThis->HandleMessage(uMsg, wParam, lParam);
-    }
-    
-    return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    if (self && self->m_hWnd) return self->HandleMessage(uMsg, wParam, lParam);
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
 LRESULT CALLBACK SoundTrackerGUI::StatusBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    SoundTrackerGUI* pThis = (SoundTrackerGUI*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-    
-    if (pThis && uMsg == WM_LBUTTONUP) {
-        // Get click position
-        int xPos = GET_X_LPARAM(lParam);
-        
-        // Get status bar part boundaries
-        int parts[4];
-        SendMessage(hWnd, SB_GETPARTS, 4, (LPARAM)parts);
-        
-        // Check if clicked in the 4th part (log path section)
-        if (xPos > parts[2] && !pThis->m_isTracking) {
-            pThis->OnStatusBarClick();
+    auto* self = reinterpret_cast<SoundTrackerGUI*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    if (self && uMsg == WM_LBUTTONUP) {
+        int parts[5] = {};
+        SendMessageW(hWnd, SB_GETPARTS, 5, reinterpret_cast<LPARAM>(parts));
+        if (GET_X_LPARAM(lParam) > parts[3]) {
+            self->OnStatusBarClick();
             return 0;
         }
     }
-    
-    // Call original procedure
-    if (pThis && pThis->m_originalStatusProc) {
-        return CallWindowProc(pThis->m_originalStatusProc, hWnd, uMsg, wParam, lParam);
-    }
-    
-    return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    if (self && self->m_originalStatusProc) return CallWindowProcW(self->m_originalStatusProc, hWnd, uMsg, wParam, lParam);
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
 LRESULT SoundTrackerGUI::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -313,325 +273,349 @@ LRESULT SoundTrackerGUI::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
                 case ID_BUTTON_START_STOP:
-                    OnStartStop();
-                    break;
+                case ID_MENU_START_STOP: OnStartStop(); break;
                 case ID_BUTTON_CLEAR:
-                    OnClear();
+                case ID_MENU_CLEAR: OnClear(); break;
+                case ID_BUTTON_ALERTS:
+                case ID_MENU_ALERTS:
+                    if (m_inTray) RestoreFromTray();
+                    m_alertsDialog->Show();
                     break;
-                case ID_CHECKBOX_FILTER:
-                    OnFilterChanged();
+                case ID_CHECKBOX_FILTER: OnFilterChanged(); break;
+                case ID_EDIT_FILTER:
+                    if (HIWORD(wParam) == EN_CHANGE && m_settings.filterEnabled) UpdateListView(true);
                     break;
-                case ID_MENU_RESTORE:
-                    RestoreFromTray();
+                case ID_MENU_RESTORE: RestoreFromTray(); break;
+                case ID_MENU_EXIT: PostMessageW(m_hWnd, WM_CLOSE, 0, 0); break;
+                case ID_MENU_OPEN_LOGS: OpenLogsFolder(m_tracker->GetCurrentLogPath()); break;
+                case ID_MENU_OPEN_DEBUG_LOG: OpenLogsFolder(dbg::CurrentLogPath()); break;
+                case ID_MENU_AUTOSTART:
+                    m_settings.startTrackingOnLaunch = !m_settings.startTrackingOnLaunch;
+                    SaveSettings();
+                    UpdateMenuChecks();
                     break;
-                case ID_MENU_EXIT:
-                    PostMessage(m_hWnd, WM_CLOSE, 0, 0);
+                case ID_MENU_WINDOW_TITLES:
+                    m_settings.recordWindowTitles = !m_settings.recordWindowTitles;
+                    m_tracker->SetRecordWindowTitles(m_settings.recordWindowTitles);
+                    SaveSettings();
+                    UpdateMenuChecks();
                     break;
-                case ID_MENU_START_STOP:
-                    OnStartStop();
-                    break;
+                case ID_MENU_DEBUG_NORMAL: SetDebugPreset(0); break;
+                case ID_MENU_DEBUG_DEBUG: SetDebugPreset(1); break;
+                case ID_MENU_DEBUG_VERBOSE: SetDebugPreset(2); break;
+                case ID_MENU_TESTING_GUIDE: ShellExecuteW(m_hWnd, L"open", kTestingGuideUrl, nullptr, nullptr, SW_SHOWNORMAL); break;
+                case ID_MENU_ABOUT: ShowAbout(); break;
             }
-            break;
-            
-        case WM_NOTIFY:
-            {
-                LPNMHDR pnmh = (LPNMHDR)lParam;
-                if (pnmh->idFrom == ID_LISTVIEW && pnmh->code == NM_CLICK) {
-                    OnListViewClick();
-                }
+            return 0;
+
+        case WM_NOTIFY: {
+            auto* hdr = reinterpret_cast<LPNMHDR>(lParam);
+            if (hdr->idFrom == ID_LISTVIEW) {
+                if (hdr->code == LVN_GETDISPINFOW) OnListDispInfo(reinterpret_cast<NMLVDISPINFOW*>(lParam));
+                else if (hdr->code == NM_CLICK) OnListViewClick();
             }
-            break;
-            
-            
+            return 0;
+        }
+
         case WM_SIZE:
             if (wParam == SIZE_MINIMIZED) {
                 MinimizeToTray();
             } else {
-                // Resize ListView
-                RECT rcClient;
-                GetClientRect(m_hWnd, &rcClient);
-                SetWindowPos(m_hListView, nullptr, 
-                           10, 60, 
-                           rcClient.right - 20, 
-                           rcClient.bottom - 110,
-                           SWP_NOZORDER);
-                
-                // Resize status bar
-                SendMessage(m_hStatusBar, WM_SIZE, 0, 0);
+                LayoutControls();
             }
-            break;
-            
+            return 0;
+
         case WM_TRAYICON:
             OnTrayIcon(lParam);
-            break;
-            
+            return 0;
+
+        case WM_APP_ALERT:
+            OnAlert(reinterpret_cast<AlertFire*>(lParam));
+            return 0;
+
         case WM_TIMER:
             if (wParam == ID_TIMER_UPDATE) {
-                UpdateListView();
+                UpdateListView(false);
                 UpdateStatusBar();
+            } else if (wParam == ID_TIMER_EXIT) {
+                KillTimer(m_hWnd, ID_TIMER_EXIT);
+                LOG_INFO("ui", L"Exit timer elapsed, closing");
+                m_exitTimerFired = true;
+                PostMessageW(m_hWnd, WM_CLOSE, 0, 0);
             }
-            break;
-            
+            return 0;
+
         case WM_CLOSE:
-            if (m_isTracking) {
-                int result = MessageBox(m_hWnd, 
-                    L"Sound tracking is active. Do you want to stop and exit?",
-                    L"Confirm Exit", MB_YESNO | MB_ICONQUESTION);
-                if (result != IDYES) {
+            if (m_isTracking && !m_exitTimerFired) {
+                if (m_inTray) RestoreFromTray();
+                if (MessageBoxW(m_hWnd, L"Sound tracking is active. Stop tracking and exit?", L"Confirm Exit",
+                                MB_YESNO | MB_ICONQUESTION) != IDYES) {
                     return 0;
                 }
-                // Stop tracking before exit
+            }
+            SaveSettings();
+            if (m_isTracking) {
                 m_tracker->Stop();
                 m_isTracking = false;
             }
+            m_overlays->CloseAll();
             DestroyWindow(m_hWnd);
-            break;
-            
+            return 0;
+
         case WM_DESTROY:
-            if (m_inTray) {
-                Shell_NotifyIcon(NIM_DELETE, &m_trayIcon);
-            }
+            KillTimer(m_hWnd, ID_TIMER_UPDATE);
+            if (m_inTray) Shell_NotifyIconW(NIM_DELETE, &m_trayIcon);
             PostQuitMessage(0);
-            break;
-            
-        default:
-            return DefWindowProc(m_hWnd, uMsg, wParam, lParam);
+            return 0;
     }
-    
-    return 0;
+    return DefWindowProcW(m_hWnd, uMsg, wParam, lParam);
 }
 
 void SoundTrackerGUI::OnStartStop() {
     if (m_isTracking) {
-        // Stop tracking and auto-save
         m_tracker->Stop();
         m_isTracking = false;
-        SetWindowText(m_hButtonStartStop, L"Start Tracking");
-        SendMessage(m_hStatusBar, SB_SETTEXT, 0, (LPARAM)L"Status: Stopped");
+        SetWindowTextW(m_hButtonStartStop, L"Start Tracking");
     } else {
-        // Start tracking
         m_tracker->Start();
         m_isTracking = true;
-        SetWindowText(m_hButtonStartStop, L"Stop Tracking");
-        SendMessage(m_hStatusBar, SB_SETTEXT, 0, (LPARAM)L"Status: Recording");
+        SetWindowTextW(m_hButtonStartStop, L"Stop Tracking");
     }
+    m_lastVersion = ~0ull;
+    UpdateListView(true);
+    UpdateStatusBar();
 }
 
 void SoundTrackerGUI::OnClear() {
-    ClearListView();
-    m_lastEventCount = m_tracker->GetEventCount();
+    m_clearedAfterId = m_tracker->GetLastEventId();
+    UpdateListView(true);
 }
 
 void SoundTrackerGUI::OnFilterChanged() {
-    m_filterEnabled = (SendMessage(m_hFilterCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    EnableWindow(m_hFilterEdit, m_filterEnabled);
-    
-    if (m_filterEnabled) {
-        SetFocus(m_hFilterEdit);
-    }
-    
-    UpdateListView();
+    m_settings.filterEnabled = Button_GetCheck(m_hFilterCheckbox) == BST_CHECKED;
+    EnableWindow(m_hFilterEdit, m_settings.filterEnabled);
+    if (m_settings.filterEnabled) SetFocus(m_hFilterEdit);
+    UpdateListView(true);
 }
 
-void SoundTrackerGUI::OnListViewClick() {
-    // Get the selected item
-    int selectedIndex = ListView_GetNextItem(m_hListView, -1, LVNI_SELECTED);
-    if (selectedIndex == -1) return;
-    
-    // Build the row content
-    std::wstring rowContent;
-    WCHAR buffer[512];
-    
-    // Get all column data
-    for (int col = 0; col < 8; col++) {
-        ListView_GetItemText(m_hListView, selectedIndex, col, buffer, 512);
-        if (col > 0) rowContent += L"\t";
-        rowContent += buffer;
+void SoundTrackerGUI::UpdateListView(bool force) {
+    uint64_t version = m_tracker->GetEventsVersion();
+    if (!force && version == m_lastVersion) return;
+    m_lastVersion = version;
+
+    uint64_t selectedId = 0;
+    int selected = ListView_GetNextItem(m_hListView, -1, LVNI_SELECTED);
+    if (selected >= 0 && selected < static_cast<int>(m_rows.size())) selectedId = m_rows[static_cast<size_t>(selected)].id;
+
+    std::wstring filter;
+    if (m_settings.filterEnabled) {
+        int len = GetWindowTextLengthW(m_hFilterEdit);
+        std::wstring text(static_cast<size_t>(len) + 1, L'\0');
+        GetWindowTextW(m_hFilterEdit, &text[0], len + 1);
+        text.resize(static_cast<size_t>(len));
+        m_settings.filterText = text;
+        filter = Lower(text);
     }
-    
-    // Copy to clipboard
-    if (OpenClipboard(m_hWnd)) {
-        EmptyClipboard();
-        
-        size_t size = (rowContent.length() + 1) * sizeof(WCHAR);
-        HGLOBAL hGlobal = GlobalAlloc(GMEM_MOVEABLE, size);
-        if (hGlobal) {
-            LPWSTR pGlobal = (LPWSTR)GlobalLock(hGlobal);
-            if (pGlobal) {
-                wcscpy_s(pGlobal, rowContent.length() + 1, rowContent.c_str());
-                GlobalUnlock(hGlobal);
-                SetClipboardData(CF_UNICODETEXT, hGlobal);
+
+    auto events = m_tracker->GetEventsSnapshot(m_clearedAfterId, 2000);
+    m_rows.clear();
+    m_rows.reserve(events.size());
+    for (auto it = events.rbegin(); it != events.rend(); ++it) {
+        if (!filter.empty() && Lower(it->processName).find(filter) == std::wstring::npos &&
+            Lower(it->soundDescription).find(filter) == std::wstring::npos &&
+            Lower(it->windowTitle).find(filter) == std::wstring::npos) {
+            continue;
+        }
+        m_rows.push_back(std::move(*it));
+    }
+    ListView_SetItemCountEx(m_hListView, static_cast<int>(m_rows.size()), LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL);
+    if (selectedId) {
+        ListView_SetItemState(m_hListView, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        for (size_t i = 0; i < m_rows.size(); ++i) {
+            if (m_rows[i].id == selectedId) {
+                ListView_SetItemState(m_hListView, static_cast<int>(i), LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                break;
             }
         }
-        
-        CloseClipboard();
-        
-        // Brief visual feedback in status bar
-        SendMessage(m_hStatusBar, SB_SETTEXT, 3, (LPARAM)L"Row copied to clipboard!");
-        
-        // The status will be updated on next timer tick
     }
+    InvalidateRect(m_hListView, nullptr, FALSE);
 }
 
-void SoundTrackerGUI::OnStatusBarClick() {
-    // Get the current log path from the tracker
-    std::wstring logPath = m_tracker->GetCurrentLogPath();
-    
-    if (!logPath.empty()) {
-        // Get the directory path (remove filename)
-        size_t lastSlash = logPath.find_last_of(L"\\");
-        std::wstring logDir = logPath.substr(0, lastSlash);
-        
-        // Convert to absolute path if needed
-        WCHAR fullPath[MAX_PATH];
-        GetFullPathNameW(logDir.c_str(), MAX_PATH, fullPath, nullptr);
-        
-        // Open Windows Explorer with the log file selected
-        std::wstring explorerCmd = L"/select,\"" + logPath + L"\"";
-        ShellExecuteW(nullptr, L"open", L"explorer.exe", explorerCmd.c_str(), nullptr, SW_SHOW);
-    }
-}
-
-void SoundTrackerGUI::UpdateListView() {
-    // Get current events
-    auto now = std::chrono::system_clock::now();
-    auto thirtySecondsAgo = now - std::chrono::seconds(30);
-    auto events = m_tracker->GetEvents(thirtySecondsAgo, now);
-    
-    // Apply filter if enabled
-    if (m_filterEnabled) {
-        WCHAR filterText[256];
-        GetWindowText(m_hFilterEdit, filterText, 256);
-        m_filterText = filterText;
-        
-        // Convert to lowercase for case-insensitive search
-        std::transform(m_filterText.begin(), m_filterText.end(), m_filterText.begin(), ::towlower);
-        
-        events.erase(std::remove_if(events.begin(), events.end(),
-            [this](const AudioEvent& event) {
-                std::wstring processLower = event.processName;
-                std::transform(processLower.begin(), processLower.end(), processLower.begin(), ::towlower);
-                
-                std::wstring descLower = event.soundDescription;
-                std::transform(descLower.begin(), descLower.end(), descLower.begin(), ::towlower);
-                
-                return processLower.find(m_filterText) == std::wstring::npos &&
-                       descLower.find(m_filterText) == std::wstring::npos;
-            }), events.end());
-    }
-    
-    // Only update if there are new events - compare actual content, not just count
-    static size_t lastEventHash = 0;
-    size_t currentHash = 0;
-    for (const auto& event : events) {
-        currentHash ^= std::hash<DWORD>()(event.processId) + 
-                      std::hash<std::wstring>()(event.processName);
-    }
-    
-    if (currentHash != lastEventHash || events.size() != ListView_GetItemCount(m_hListView)) {
-        lastEventHash = currentHash;
-        
-        // Use SetRedraw to prevent flashing
-        SendMessage(m_hListView, WM_SETREDRAW, FALSE, 0);
-        
-        ClearListView();
-        
-        // Add events in reverse order (newest first)
-        for (auto it = events.rbegin(); it != events.rend(); ++it) {
-            AddEventToListView(*it);
+std::wstring SoundTrackerGUI::CellText(const AudioEvent& e, int column) const {
+    wchar_t buf[64];
+    switch (column) {
+        case ColTime: {
+            auto t = std::chrono::system_clock::to_time_t(e.timestamp);
+            std::tm tm{};
+            localtime_s(&tm, &t);
+            swprintf_s(buf, L"%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
+            return buf;
         }
-        
-        // Re-enable drawing and refresh
-        SendMessage(m_hListView, WM_SETREDRAW, TRUE, 0);
-        InvalidateRect(m_hListView, NULL, FALSE);
+        case ColDuration:
+            if (e.durationMs < 1000) swprintf_s(buf, L"%lu ms", e.durationMs);
+            else swprintf_s(buf, L"%.1f s", e.durationMs / 1000.0);
+            return e.ongoing ? std::wstring(buf) + L" \x25B6" : std::wstring(buf);
+        case ColProcess: return e.processName;
+        case ColPid: return std::to_wstring(e.processId);
+        case ColWindow: return e.windowTitle;
+        case ColDescription: return e.soundDescription;
+        case ColPeak: swprintf_s(buf, L"%.0f%%", e.peakLevel * 100); return buf;
+        case ColVolume: swprintf_s(buf, L"%.0f%%", e.volumeLevel * 100); return buf;
+        case ColAlerts: return e.alertsFired ? std::to_wstring(e.alertsFired) : std::wstring();
+        case ColDevice: return e.deviceName;
+        case ColPath: return e.processPath;
     }
+    return std::wstring();
 }
 
-void SoundTrackerGUI::AddEventToListView(const AudioEvent& event) {
-    LVITEM lvi = { 0 };
-    lvi.mask = LVIF_TEXT;
-    lvi.iItem = 0;  // Insert at top
-    
-    // Format time with only hours and minutes
-    auto time_t = std::chrono::system_clock::to_time_t(event.timestamp);
-    std::tm tm;
-    localtime_s(&tm, &time_t);
-    WCHAR timeStr[32];
-    swprintf_s(timeStr, L"%02d:%02d", tm.tm_hour, tm.tm_min);
-    
-    // Add item
-    lvi.pszText = timeStr;
-    int index = ListView_InsertItem(m_hListView, &lvi);
-    
-    // Set subitems
-    // Count column - only show if > 1
-    if (event.eventCount > 1) {
-        WCHAR countStr[16];
-        swprintf_s(countStr, L"%d", event.eventCount);
-        ListView_SetItemText(m_hListView, index, 1, countStr);
-    } else {
-        ListView_SetItemText(m_hListView, index, 1, L"");
-    }
-    
-    ListView_SetItemText(m_hListView, index, 2, (LPWSTR)event.processName.c_str());
-    
-    WCHAR pidStr[16];
-    swprintf_s(pidStr, L"%d", event.processId);
-    ListView_SetItemText(m_hListView, index, 3, pidStr);
-    
-    ListView_SetItemText(m_hListView, index, 4, (LPWSTR)event.soundDescription.c_str());
-    
-    WCHAR volumeStr[16];
-    swprintf_s(volumeStr, L"%.0f%%", event.volumeLevel * 100);
-    ListView_SetItemText(m_hListView, index, 5, volumeStr);
-    
-    WCHAR peakStr[16];
-    swprintf_s(peakStr, L"%.0f%%", event.peakLevel * 100);
-    ListView_SetItemText(m_hListView, index, 6, peakStr);
-    
-    ListView_SetItemText(m_hListView, index, 7, (LPWSTR)event.processPath.c_str());
-}
-
-void SoundTrackerGUI::ClearListView() {
-    ListView_DeleteAllItems(m_hListView);
+void SoundTrackerGUI::OnListDispInfo(NMLVDISPINFOW* info) {
+    if (!(info->item.mask & LVIF_TEXT)) return;
+    int row = info->item.iItem;
+    if (row < 0 || row >= static_cast<int>(m_rows.size())) return;
+    std::wstring text = CellText(m_rows[static_cast<size_t>(row)], info->item.iSubItem);
+    wcsncpy_s(info->item.pszText, static_cast<size_t>(info->item.cchTextMax), text.c_str(), _TRUNCATE);
 }
 
 void SoundTrackerGUI::UpdateStatusBar() {
-    // Update event count
-    size_t eventCount = m_tracker->GetEventCount();
-    WCHAR countStr[64];
-    swprintf_s(countStr, L"Events: %zu", eventCount);
-    SendMessage(m_hStatusBar, SB_SETTEXT, 1, (LPARAM)countStr);
-    
-    // Update duration
-    auto now = std::chrono::system_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::seconds>(
-        now - m_tracker->GetStartTime());
-    
-    int hours = static_cast<int>(duration.count() / 3600);
-    int minutes = static_cast<int>((duration.count() % 3600) / 60);
-    int seconds = static_cast<int>(duration.count() % 60);
-    
-    WCHAR durationStr[64];
-    swprintf_s(durationStr, L"Duration: %02d:%02d:%02d", hours, minutes, seconds);
-    SendMessage(m_hStatusBar, SB_SETTEXT, 2, (LPARAM)durationStr);
-    
-    // Show current log file path
+    std::wstring status = std::wstring(m_isTracking ? L"Recording" : L"Stopped") + L" | Log level: " +
+                          dbg::PresetName(static_cast<dbg::Preset>(CurrentPreset()));
+    SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(status.c_str()));
+
+    std::wstring sounds = L"Sounds: " + std::to_wstring(m_tracker->GetSoundCount());
+    SendMessageW(m_hStatusBar, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(sounds.c_str()));
+
+    long long secs = m_isTracking ? std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::system_clock::now() - m_tracker->GetStartTime()).count()
+                                  : 0;
+    wchar_t duration[64];
+    swprintf_s(duration, L"Duration: %02lld:%02lld:%02lld", secs / 3600, (secs % 3600) / 60, secs % 60);
+    SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(duration));
+
+    size_t enabledRules = std::count_if(m_settings.alerts.begin(), m_settings.alerts.end(), [](const AlertRule& r) { return r.enabled; });
+    std::wstring alerts = L"Alerts: " + std::to_wstring(m_tracker->GetAlertCount()) + L" (" + std::to_wstring(enabledRules) + (enabledRules == 1 ? L" rule)" : L" rules)");
+    SendMessageW(m_hStatusBar, SB_SETTEXTW, 3, reinterpret_cast<LPARAM>(alerts.c_str()));
+
     std::wstring logPath = m_tracker->GetCurrentLogPath();
-    if (!logPath.empty()) {
-        std::wstring statusText;
-        if (!m_isTracking) {
-            // When stopped, show it's clickable
-            statusText = L"Log: " + logPath + L" (Click to open)";
+    std::wstring logText = logPath.empty() ? L"Logs: " + AppPaths::LogsDir() + L" (click to open)" : L"Log: " + logPath + L" (click to open)";
+    SendMessageW(m_hStatusBar, SB_SETTEXTW, 4, reinterpret_cast<LPARAM>(logText.c_str()));
+}
+
+void SoundTrackerGUI::OnListViewClick() {
+    int selected = ListView_GetNextItem(m_hListView, -1, LVNI_SELECTED);
+    if (selected < 0 || selected >= static_cast<int>(m_rows.size())) return;
+    std::wstring row;
+    for (int col = 0; col < ColCount; ++col) {
+        if (col) row += L"\t";
+        row += CellText(m_rows[static_cast<size_t>(selected)], col);
+    }
+    if (!OpenClipboard(m_hWnd)) return;
+    EmptyClipboard();
+    size_t bytes = (row.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (mem) {
+        if (auto* dst = static_cast<wchar_t*>(GlobalLock(mem))) {
+            memcpy(dst, row.c_str(), bytes);
+            GlobalUnlock(mem);
+            if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
         } else {
-            statusText = L"Log: " + logPath;
+            GlobalFree(mem);
         }
-        SendMessage(m_hStatusBar, SB_SETTEXT, 3, (LPARAM)statusText.c_str());
+    }
+    CloseClipboard();
+    SendMessageW(m_hStatusBar, SB_SETTEXTW, 4, reinterpret_cast<LPARAM>(L"Row copied to clipboard"));
+}
+
+void SoundTrackerGUI::OnStatusBarClick() { OpenLogsFolder(m_tracker->GetCurrentLogPath()); }
+
+void SoundTrackerGUI::OpenLogsFolder(const std::wstring& selectFile) {
+    if (!selectFile.empty() && GetFileAttributesW(selectFile.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::wstring args = L"/select,\"" + selectFile + L"\"";
+        ShellExecuteW(m_hWnd, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+    } else {
+        ShellExecuteW(m_hWnd, L"open", AppPaths::LogsDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 }
 
+void SoundTrackerGUI::OnAlert(AlertFire* fire) {
+    std::unique_ptr<AlertFire> owned(fire);
+    if (!fire || !m_overlays) return;
+    auto dispatchMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - fire->detectedAt).count();
+    std::vector<HWND> windows = procinfo::FindMainWindows(fire->windowOwnerPid);
+    if (windows.empty()) windows = procinfo::ResolveWindowOwner(fire->processId, fire->processName).windows;
+    if (windows.empty()) {
+        LOG_WARN("alerts", L"Alert '" << fire->rule.name << L"' fired for " << fire->processName << L" PID " << fire->processId
+                                      << L" but it has no visible window to highlight");
+        return;
+    }
+    std::wstring label = fire->rule.name + L": " + fire->processName + L" (PID " + std::to_wstring(fire->processId) + L")";
+    if (windows.size() > 1) label += L" - " + std::to_wstring(windows.size()) + L" windows, can't tell which";
+    LOG_DEBUG("alerts", L"Dispatching alert to " << windows.size() << L" window(s), " << dispatchMs << L" ms after detection");
+    m_overlays->Flash(windows, fire->rule, label);
+}
+
+void SoundTrackerGUI::TestFlash(DWORD pid, const std::wstring& processName, const AlertRule& style, const std::wstring& label) {
+    auto owner = procinfo::ResolveWindowOwner(pid, processName);
+    LOG_INFO("alerts", L"Test border for " << processName << L" PID " << pid << L": " << owner.windows.size()
+                                           << L" window(s) (owner PID " << owner.pid << L")");
+    if (owner.windows.empty()) {
+        std::wstring msg = processName + L" (PID " + std::to_wstring(pid) + L") has no visible window to highlight.";
+        MessageBoxW(m_alertsDialog && m_alertsDialog->Hwnd() ? m_alertsDialog->Hwnd() : m_hWnd, msg.c_str(), L"Window Alerts", MB_ICONINFORMATION);
+        return;
+    }
+    m_overlays->Flash(owner.windows, style, label);
+}
+
+void SoundTrackerGUI::OnRulesChanged() {
+    SaveSettings();
+    m_tracker->SetRules(m_settings.alerts);
+    LOG_INFO("ui", L"Alert rules saved (" << m_settings.alerts.size() << L")");
+    UpdateStatusBar();
+}
+
+std::vector<LiveSessionInfo> SoundTrackerGUI::GetLiveSessions() { return m_tracker->GetLiveSessions(); }
+
+void SoundTrackerGUI::SetDebugPreset(int preset) {
+    m_settings.debugPreset = preset;
+    dbg::SetLevel(dbg::LevelForPreset(static_cast<dbg::Preset>(preset)));
+    LOG_INFO("ui", L"Debug log level set to " << dbg::PresetName(static_cast<dbg::Preset>(preset)));
+    SaveSettings();
+    UpdateMenuChecks();
+    UpdateStatusBar();
+}
+
+void SoundTrackerGUI::ShowAbout() {
+    std::wstring text = std::wstring(APP_NAME_WSTR) + L" " + APP_VERSION_WSTR +
+                        L"\n\nData folder: " + AppPaths::DataDir() + (AppPaths::IsPortable() ? L" (portable)" : L"") +
+                        L"\nSettings: " + AppPaths::SettingsFile() +
+                        L"\nDebug log: " + dbg::CurrentLogPath() +
+                        L"\nSound log: " + (m_tracker->GetCurrentLogPath().empty() ? L"(not tracking yet)" : m_tracker->GetCurrentLogPath()) +
+                        L"\n\nTo report a problem, set Options > Debug Logging > Debug, reproduce it, then send the "
+                        L"debug_*.log files from the logs folder.\n\nhttps://github.com/IronAdamant/windows_sound_tracker";
+    MessageBoxW(m_hWnd, text.c_str(), L"About Sound Tracker", MB_ICONINFORMATION);
+}
+
+void SoundTrackerGUI::SaveSettings() {
+    WINDOWPLACEMENT wp{};
+    wp.length = sizeof(wp);
+    if (m_hWnd && GetWindowPlacement(m_hWnd, &wp)) {
+        m_settings.windowRect = wp.rcNormalPosition;
+        m_settings.hasWindowRect = true;
+    }
+    if (m_hFilterEdit) {
+        int len = GetWindowTextLengthW(m_hFilterEdit);
+        std::wstring text(static_cast<size_t>(len) + 1, L'\0');
+        GetWindowTextW(m_hFilterEdit, &text[0], len + 1);
+        text.resize(static_cast<size_t>(len));
+        m_settings.filterText = text;
+    }
+    if (!m_settings.Save(AppPaths::SettingsFile())) LOG_WARN("ui", L"Saving settings failed: " << AppPaths::SettingsFile());
+}
+
 void SoundTrackerGUI::MinimizeToTray() {
-    Shell_NotifyIcon(NIM_ADD, &m_trayIcon);
+    if (!Shell_NotifyIconW(NIM_ADD, &m_trayIcon)) {
+        LOG_WARN("ui", L"Could not add tray icon; staying minimized on the taskbar");
+        return;
+    }
     ShowWindow(m_hWnd, SW_HIDE);
     m_inTray = true;
 }
@@ -639,88 +623,38 @@ void SoundTrackerGUI::MinimizeToTray() {
 void SoundTrackerGUI::RestoreFromTray() {
     ShowWindow(m_hWnd, SW_RESTORE);
     SetForegroundWindow(m_hWnd);
-    Shell_NotifyIcon(NIM_DELETE, &m_trayIcon);
+    if (m_inTray) Shell_NotifyIconW(NIM_DELETE, &m_trayIcon);
     m_inTray = false;
 }
 
 void SoundTrackerGUI::OnTrayIcon(LPARAM lParam) {
     switch (lParam) {
-        case WM_LBUTTONDBLCLK:
-            RestoreFromTray();
-            break;
-            
-        case WM_RBUTTONUP:
-            ShowTrayMenu();
-            break;
+        case WM_LBUTTONDBLCLK: RestoreFromTray(); break;
+        case WM_RBUTTONUP: ShowTrayMenu(); break;
     }
 }
 
 void SoundTrackerGUI::ShowTrayMenu() {
     POINT pt;
     GetCursorPos(&pt);
-    
-    HMENU hMenu = CreatePopupMenu();
-    AppendMenu(hMenu, MF_STRING, ID_MENU_RESTORE, L"Restore");
-    AppendMenu(hMenu, MF_STRING, ID_MENU_START_STOP, 
-               m_isTracking ? L"Stop Tracking" : L"Start Tracking");
-    AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenu(hMenu, MF_STRING, ID_MENU_EXIT, L"Exit");
-    
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, ID_MENU_RESTORE, L"Restore");
+    AppendMenuW(menu, MF_STRING, ID_MENU_START_STOP, m_isTracking ? L"Stop Tracking" : L"Start Tracking");
+    AppendMenuW(menu, MF_STRING, ID_MENU_ALERTS, L"Window Alerts...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_MENU_EXIT, L"Exit");
     SetForegroundWindow(m_hWnd);
-    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, m_hWnd, nullptr);
-    DestroyMenu(hMenu);
-}
-
-void SoundTrackerGUI::UpdateThreadProc() {
-    while (m_updateThreadRunning) {
-        if (m_isTracking) {
-            // Post message to update UI in main thread
-            PostMessage(m_hWnd, WM_TIMER, ID_TIMER_UPDATE, 0);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(250)); // Faster updates
-    }
-}
-
-
-
-void SoundTrackerGUI::UpdateButtonStates() {
-    // Update button states based on tracking status
-    EnableWindow(m_hButtonClear, !m_isTracking);
-}
-
-std::wstring SoundTrackerGUI::FormatDuration(DWORD milliseconds) {
-    DWORD seconds = milliseconds / 1000;
-    DWORD ms = milliseconds % 1000;
-    return std::to_wstring(seconds) + L"." + std::to_wstring(ms) + L"s";
-}
-
-std::wstring SoundTrackerGUI::FormatVolume(float level) {
-    int percentage = static_cast<int>(level * 100);
-    return std::to_wstring(percentage) + L"%";
-}
-
-void SoundTrackerGUI::Cleanup() {
-    // Stop tracking
-    if (m_isTracking) {
-        m_tracker->Stop();
-    }
-    
-    // Stop update thread
-    m_updateThreadRunning = false;
-    if (m_updateThread.joinable()) {
-        m_updateThread.join();
-    }
-    
-    // Clean up fonts
-    if (m_hFont) DeleteObject(m_hFont);
-    if (m_hBoldFont) DeleteObject(m_hBoldFont);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, m_hWnd, nullptr);
+    DestroyMenu(menu);
 }
 
 int SoundTrackerGUI::Run() {
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) {
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        HWND alerts = m_alertsDialog ? m_alertsDialog->Hwnd() : nullptr;
+        if (alerts && IsDialogMessageW(alerts, &msg)) continue;
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
     return static_cast<int>(msg.wParam);
 }

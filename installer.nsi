@@ -1,7 +1,7 @@
 ; Sound Tracker NSIS Installer Script
 !define PRODUCT_NAME "Windows Sound Tracker"
-!define PRODUCT_VERSION "1.0"
-!define PRODUCT_PUBLISHER "Your Company"
+!define PRODUCT_VERSION "1.2.0"
+!define PRODUCT_PUBLISHER "IronAdamant"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\SoundTracker.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 
@@ -44,11 +44,11 @@ Section "MainSection" SEC01
   SetOverwrite try
   
   ; Copy main executable
-  File "standalone\bin\Release\SoundTracker.exe"
-  
-  ; Create logs directory
-  CreateDirectory "$INSTDIR\logs"
-  
+  File "build_release\bin\Release\SoundTracker.exe"
+
+  ; Program Files is read-only for the app, so it keeps settings and logs in
+  ; %LOCALAPPDATA%\WindowsSoundTracker automatically.
+
   ; Create shortcuts
   CreateDirectory "$SMPROGRAMS\Sound Tracker"
   CreateShortCut "$SMPROGRAMS\Sound Tracker\Sound Tracker.lnk" "$INSTDIR\SoundTracker.exe"

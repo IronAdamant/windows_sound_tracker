@@ -1,108 +1,79 @@
 #pragma once
-#define NOMINMAX  // Prevent Windows.h from defining min/max macros
 #include <windows.h>
-#include <mmdeviceapi.h>
-#include <audiopolicy.h>
-#include <endpointvolume.h>
-#include <functiondiscoverykeys_devpkey.h>
-#include <vector>
-#include <string>
-#include <chrono>
-#include <mutex>
-#include <thread>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <functional>
 #include <memory>
-#include <unordered_map>
+#include <string>
+#include <vector>
 
-#pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "winmm.lib")
-#pragma comment(lib, "psapi.lib")
-
-// Include the separated AudioEvent structure
 #include "AudioEvent.h"
+#include "Settings.h"
+#include "SoundDetector.h"
 
-// Custom implementation of IAudioSessionEvents interface
-class CSoundTrackerAudioSessionEvents : public IAudioSessionEvents {
-public:
-    LONG _cRef;
-    class SoundTracker* _pTracker;
-    DWORD _processId;
-    std::mutex _trackerMutex;
-    std::atomic<bool> _disconnected{false};
-
-    CSoundTrackerAudioSessionEvents(class SoundTracker* pTracker, DWORD processId);
-    ~CSoundTrackerAudioSessionEvents();
-    void Detach();
-
-    // IUnknown methods
-    ULONG STDMETHODCALLTYPE AddRef();
-    ULONG STDMETHODCALLTYPE Release();
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvInterface);
-
-    // IAudioSessionEvents methods
-    HRESULT STDMETHODCALLTYPE OnDisplayNameChanged(LPCWSTR NewDisplayName, LPCGUID EventContext);
-    HRESULT STDMETHODCALLTYPE OnIconPathChanged(LPCWSTR NewIconPath, LPCGUID EventContext);
-    HRESULT STDMETHODCALLTYPE OnSimpleVolumeChanged(float NewVolume, BOOL NewMute, LPCGUID EventContext);
-    HRESULT STDMETHODCALLTYPE OnChannelVolumeChanged(DWORD ChannelCount, float NewChannelVolumeArray[], DWORD ChangedChannel, LPCGUID EventContext);
-    HRESULT STDMETHODCALLTYPE OnGroupingParamChanged(LPCGUID NewGroupingParam, LPCGUID EventContext);
-    HRESULT STDMETHODCALLTYPE OnStateChanged(AudioSessionState NewState);
-    HRESULT STDMETHODCALLTYPE OnSessionDisconnected(AudioSessionDisconnectReason DisconnectReason);
+// Raised on the monitor thread when an alert rule fires.
+struct AlertFire {
+    DWORD processId = 0;
+    DWORD windowOwnerPid = 0;
+    std::wstring processName;
+    AlertRule rule;
+    float peak = 0.0f;
+    TimeMs quietForMs = -1;
+    std::chrono::steady_clock::time_point detectedAt;
 };
 
+// Snapshot of one audio session for the live levels view.
+struct LiveSessionInfo {
+    DWORD processId = 0;
+    DWORD windowOwnerPid = 0;
+    std::wstring processName;
+    std::wstring windowTitle;
+    std::wstring deviceName;
+    bool isSystem = false;
+    float peakNow = 0.0f;
+    float peakRecentMax = 0.0f;  // Loudest reading in roughly the last 2-3 seconds
+    std::wstring ruleNames;
+    std::wstring alertState;
+    uint64_t alertsFired = 0;
+};
+
+// Watches every audio session on every output device.
+//
+// A dedicated MTA thread owns all Core Audio objects. It samples each session's
+// peak meter every few milliseconds, turns the readings into discrete sounds
+// (for the list and CSV) and runs the alert rules. Session and device changes
+// arrive as notifications, with a periodic re-scan as a safety net.
 class SoundTracker {
-private:
-    std::atomic<bool> m_running;
-    std::thread m_monitorThread;
-    std::mutex m_logMutex;
-    std::mutex m_cacheMutex;  // Separate mutex for process cache to avoid deadlock
-    std::vector<AudioEvent> m_events;
-    IMMDeviceEnumerator* m_pEnumerator;
-    bool m_comInitialized = false;
-    std::unordered_map<DWORD, std::wstring> m_processCache;
-    std::unordered_map<DWORD, std::wstring> m_sessionNames;  // Store session display names
-    std::chrono::system_clock::time_point m_startTime;
-    std::wstring m_logFilePath;
-    std::unique_ptr<class Logger> m_logger;  // Single logger instance for efficiency
-    
-    struct SessionRegistration {
-        IAudioSessionControl2* control = nullptr;
-        CSoundTrackerAudioSessionEvents* events = nullptr;
-        bool seen = false;
-        ~SessionRegistration();
-    };
-    // Session instance IDs remain stable across enumerations; COM pointers need not.
-    // Only the monitor thread owns and removes registrations.
-    std::unordered_map<std::wstring, std::unique_ptr<SessionRegistration>> m_activeEvents;
-
-    void MonitorAudioSessions();
-    bool ProcessAudioSession(IAudioSessionControl2* pSessionControl);
-    void RemoveInactiveSessions(bool enumerationComplete);
-    std::wstring GetProcessNameFromPID(DWORD processId);
-    std::wstring GetProcessPathFromPID(DWORD processId);
-    std::wstring GetSoundDescription(DWORD processId, const std::wstring& processName);
-    std::wstring GetUSBDeviceInfo(DWORD processId, const std::wstring& processName);
-    std::wstring GetBrowserTabInfo(DWORD processId, const std::wstring& processName);
-    void LogEvent(const AudioEvent& event);
-    float GetPeakMeterValue(IAudioSessionControl2* pSessionControl);
-
 public:
-    SoundTracker();
-    ~SoundTracker();
+    using AlertCallback = std::function<void(const AlertFire&)>;
 
-    bool Initialize();
+    explicit SoundTracker(std::wstring logsDirectory);
+    ~SoundTracker();
+    SoundTracker(const SoundTracker&) = delete;
+    SoundTracker& operator=(const SoundTracker&) = delete;
+
     void Start();
     void Stop();
-    bool IsRunning() const { return m_running; }
-    
-    void AddAudioEvent(DWORD processId, float volume, float peak);
-    bool ExportLogs(const std::wstring& outputPath, 
-                   const std::chrono::system_clock::time_point& startTime,
-                   const std::chrono::system_clock::time_point& endTime);
-    
-    std::vector<AudioEvent> GetEvents(const std::chrono::system_clock::time_point& startTime,
-                                     const std::chrono::system_clock::time_point& endTime);
-    
-    size_t GetEventCount() const { return m_events.size(); }
-    std::chrono::system_clock::time_point GetStartTime() const { return m_startTime; }
+    bool IsRunning() const;
+
+    // Called on the monitor thread; must be quick (post a message and return).
+    void SetAlertCallback(AlertCallback callback);
+    void SetRules(const std::vector<AlertRule>& rules);
+    void SetDetection(const DetectionSettings& detection);
+    void SetRecordWindowTitles(bool record);
+
+    // Events with id > afterId, oldest first, at most maxCount (the newest ones).
+    std::vector<AudioEvent> GetEventsSnapshot(uint64_t afterId, size_t maxCount) const;
+    uint64_t GetEventsVersion() const;  // Changes whenever an event is added or updated
+    uint64_t GetLastEventId() const;
+    uint64_t GetSoundCount() const;
+    uint64_t GetAlertCount() const;
+    std::vector<LiveSessionInfo> GetLiveSessions() const;
+    std::chrono::system_clock::time_point GetStartTime() const;
     std::wstring GetCurrentLogPath() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m;
 };
