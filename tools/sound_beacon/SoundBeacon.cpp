@@ -242,16 +242,17 @@ void ParseArgs() {
             size_t n = wcslen(prefix);
             return a.compare(0, n, prefix) == 0 ? a.c_str() + n : nullptr;
         };
+        const wchar_t* v = nullptr;
         if (a == L"--auto") g_opt.autoCast = true;
         else if (a == L"--tile") g_opt.tile = true;
-        else if (auto v = value(L"--index=")) g_opt.index = _wtoi(v);
-        else if (auto v = value(L"--cast-volume=")) g_opt.castVolume = _wtof(v);
-        else if (auto v = value(L"--splash-volume=")) g_opt.splashVolume = _wtof(v);
-        else if (auto v = value(L"--min-wait=")) g_opt.minWaitMs = _wtoi(v);
-        else if (auto v = value(L"--max-wait=")) g_opt.maxWaitMs = _wtoi(v);
-        else if (auto v = value(L"--log=")) g_opt.logPath = v;
-        else if (auto v = value(L"--exit-after=")) g_opt.exitAfterSeconds = _wtoi(v);
-        else if (auto v = value(L"--seed=")) g_opt.seed = static_cast<unsigned>(_wtoi(v));
+        else if ((v = value(L"--index="))) g_opt.index = _wtoi(v);
+        else if ((v = value(L"--cast-volume="))) g_opt.castVolume = _wtof(v);
+        else if ((v = value(L"--splash-volume="))) g_opt.splashVolume = _wtof(v);
+        else if ((v = value(L"--min-wait="))) g_opt.minWaitMs = _wtoi(v);
+        else if ((v = value(L"--max-wait="))) g_opt.maxWaitMs = _wtoi(v);
+        else if ((v = value(L"--log="))) g_opt.logPath = v;
+        else if ((v = value(L"--exit-after="))) g_opt.exitAfterSeconds = _wtoi(v);
+        else if ((v = value(L"--seed="))) g_opt.seed = static_cast<unsigned>(_wtoi(v));
     }
     if (argv) LocalFree(argv);
 }
